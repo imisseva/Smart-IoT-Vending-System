@@ -55,3 +55,9 @@ export const payOrder = async (id) => {
 
     return order;
 };
+
+// Lấy thông tin đơn hàng theo ID
+export const getOrderById = async (id) => {
+    return await OrderModel.findOrderById(id);
+};
+
