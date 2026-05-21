@@ -18,6 +18,12 @@ const int out2 = 5; // Tới IN2 Relay (Bơm Pepsi)
 int lastState = -1;
 bool isDispensing = false; // Trạng thái đang thực hiện chu trình rót nước
 
+// Watchdog ngắt bơm an toàn (Failsafe Watchdog)
+unsigned long pumpStartTime = 0;
+bool isPumpRunning = false;
+const unsigned long MAX_PUMP_TIME = 15000; // 15 giây chạy bơm liên tục tối đa
+bool pumpSafetyTripped = false;
+
 // Góc quay của Servo (Có thể điều chỉnh lại cho khớp với cơ cấu cơ khí của bạn)
 const int SERVO_LOCK_ANGLE = 0;    // Góc khóa ly (Không cho rơi)
 const int SERVO_RELEASE_ANGLE = 90; // Góc mở chốt (Nhả 1 ly xuống)
@@ -51,6 +57,42 @@ void loop() {
   bool cmd1 = digitalRead(in1);
   bool cmd2 = digitalRead(in2);
   
+  // 0. Failsafe watchdog cho bơm nước
+  bool isCommandingPump = ((cmd1 && !cmd2) || (!cmd1 && cmd2));
+  
+  if (isCommandingPump) {
+    if (!isPumpRunning) {
+      isPumpRunning = true;
+      pumpStartTime = millis();
+    } else {
+      if (millis() - pumpStartTime > MAX_PUMP_TIME) {
+        if (!pumpSafetyTripped) {
+          pumpSafetyTripped = true;
+          Serial.println("[LOI KHAN CAP] Bơm chạy liên tục vượt ngưỡng 15s. Đã kích hoạt chốt bảo vệ ngắt bơm!");
+          
+          lcd.clear();
+          lcd.setCursor(0, 0);
+          lcd.print("LOI KHAN CAP!!! ");
+          lcd.setCursor(0, 1);
+          lcd.print("QUET GIO HAN PUMP");
+        }
+      }
+    }
+  } else {
+    isPumpRunning = false;
+    // Tự động khôi phục chế độ an toàn khi ESP dừng kích hoạt (cả 2 chân LOW)
+    if (pumpSafetyTripped && !cmd1 && !cmd2) {
+      pumpSafetyTripped = false;
+      Serial.println("[An toàn] Đã khôi phục trạng thái sẵn sàng sau khi ngắt khẩn cấp.");
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("MAY BAN NUOC V5");
+      lcd.setCursor(0, 1);
+      lcd.print("DANG SAN SANG...");
+      lastState = -1; // Buộc vẽ lại trạng thái
+    }
+  }
+
   // 1. PHÁT HIỆN LỆNH LẤY LY (Cả hai chân cùng HIGH từ ESP8266)
   if (cmd1 && cmd2) {
     delay(150); // Bộ lọc chống nhiễu: Đợi 150ms xem tín hiệu có ổn định không
@@ -77,12 +119,17 @@ void loop() {
     }
   }
   // 2. PHÁT HIỆN LỆNH RÓT NƯỚC (Chỉ một trong hai chân HIGH)
-  else if ((cmd1 && !cmd2) || (!cmd1 && cmd2)) {
-    isDispensing = true;
-    
-    // Điều khiển đóng ngắt Relay bơm theo tín hiệu thời gian thực từ ESP (Đồng bộ Active HIGH cho cả hai)
-    digitalWrite(out1, cmd1); 
-    digitalWrite(out2, cmd2);
+  else if (isCommandingPump) {
+    if (pumpSafetyTripped) {
+      // Ép tắt bơm nếu đã kích hoạt chốt bảo vệ
+      digitalWrite(out1, LOW);
+      digitalWrite(out2, LOW);
+    } else {
+      isDispensing = true;
+      // Điều khiển đóng ngắt Relay bơm theo tín hiệu thời gian thực từ ESP (Đồng bộ Active HIGH cho cả hai)
+      digitalWrite(out1, cmd1); 
+      digitalWrite(out2, cmd2);
+    }
   }
   // 3. KHÔNG CÓ LỆNH HOẶC LỆNH DỪNG (Cả hai chân LOW)
   else {
@@ -97,25 +144,27 @@ void loop() {
   }
 
   // 4. HIỂN THỊ TRẠNG THÁI LÊN LCD (Chỉ in khi thay đổi trạng thái để không bị lác màn hình)
-  int currentState = 0; // Trạng thái sẵn sàng
-  if (cmd1 && cmd2) {
-    currentState = 1; // Đang nhả ly
-  } else if (isDispensing) {
-    if (cmd1) currentState = 2;      // Đang rót Coca-Cola
-    else if (cmd2) currentState = 3; // Đang rót Pepsi
-  }
-
-  if (currentState != lastState) {
-    lcd.setCursor(0, 1);
-    if (currentState == 1) {
-      // Đã in chữ "DA NHA LY!" ở trên nên không cần in đè ở đây
-    } else if (currentState == 2) {
-      lcd.print("ROT COCA-COLA...");
-    } else if (currentState == 3) {
-      lcd.print("ROT PEPSI...    ");
-    } else {
-      lcd.print("DANG SAN SANG...");
+  if (!pumpSafetyTripped) {
+    int currentState = 0; // Trạng thái sẵn sàng
+    if (cmd1 && cmd2) {
+      currentState = 1; // Đang nhả ly
+    } else if (isDispensing) {
+      if (cmd1) currentState = 2;      // Đang rót Coca-Cola
+      else if (cmd2) currentState = 3; // Đang rót Pepsi
     }
-    lastState = currentState;
+
+    if (currentState != lastState) {
+      lcd.setCursor(0, 1);
+      if (currentState == 1) {
+        // Đã in chữ "DA NHA LY!" ở trên nên không cần in đè ở đây
+      } else if (currentState == 2) {
+        lcd.print("ROT COCA-COLA...");
+      } else if (currentState == 3) {
+        lcd.print("ROT PEPSI...    ");
+      } else {
+        lcd.print("DANG SAN SANG...");
+      }
+      lastState = currentState;
+    }
   }
 }

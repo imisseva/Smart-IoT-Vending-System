@@ -57,12 +57,7 @@ export const dropCup = async (orderId) => {
 
 // Lấy lệnh hiện tại (ESP8266 polling)
 export const getCommand = () => {
-    const cmd = currentCommand;
-    if (currentCommand.startsWith("POUR_") || currentCommand === "DROP_CUP") {
-        currentCommand = "STOP"; // Tự động reset về STOP sau khi ESP lấy lệnh thành công (self-clearing)
-        console.log(`[Command] ESP8266 đã lấy lệnh '${cmd}'. Đã tự động reset lệnh về STOP để bảo vệ an toàn.`);
-    }
-    return cmd;
+    return currentCommand;
 };
 
 // Xử lý dữ liệu cảm biến từ ESP8266
@@ -75,12 +70,34 @@ export const updateSensor = async (waterLevel, isCupPlaced, dispensingProgress, 
         console.log(`[CẢNH BÁO KHẨN CẤP] Nước sắp tràn! Đã ngắt lệnh bơm.`);
     }
 
+    // ESP8266 xác nhận đã nhận lệnh (Acknowledge) hoặc đang rót nước -> tự động reset lệnh về STOP
+    if (pourStatus === 'ACK' || (dispensingProgress !== undefined && dispensingProgress > 0)) {
+        if (currentCommand !== 'STOP') {
+            console.log(`[Command] ESP8266 xác nhận đã nhận lệnh '${currentCommand}'. Đã tự động reset lệnh về STOP để bảo vệ an toàn.`);
+            currentCommand = 'STOP';
+        }
+    }
+
     // Cập nhật mực nước vào DB
     await MachineModel.updateWaterLevel(waterLevel);
 
     // Xử lý tự động hoàn thành khi máy báo cáo "DONE"
     if (pourStatus === 'DONE') {
         console.log(`[Sensor] Máy đã rót xong nước! Đang tự động hoàn tất order...`);
+        const activeOrders = await OrderModel.findActiveOrders();
+        const servingOrder = activeOrders.find(o => o.status === 'Serving');
+        if (servingOrder) {
+            await completeOrder(servingOrder.id);
+        } else {
+            currentCommand = 'STOP';
+            await MachineModel.setReady();
+            getIo().emit('queue_updated');
+        }
+    }
+
+    // Xử lý khẩn cấp khi người dùng rút ly trong lúc rót nước
+    if (pourStatus === 'CUP_REMOVED') {
+        console.log(`[Sensor - CẢNH BÁO KHẨN CẤP] Ly nước bị rút khỏi khay hứng! Đang tự động ngắt bơm và hoàn tất đơn...`);
         const activeOrders = await OrderModel.findActiveOrders();
         const servingOrder = activeOrders.find(o => o.status === 'Serving');
         if (servingOrder) {
