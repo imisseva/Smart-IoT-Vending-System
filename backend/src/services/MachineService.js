@@ -147,6 +147,13 @@ export const updateSensor = async (waterLevel, isCupPlaced, dispensingProgress, 
     const activeOrderId = currentServingOrderId;
     const activeQueueNumber = currentServingQueueNumber;
 
+    // An toàn: Nếu nước quá đầy (khoảng cách < 5cm) → tắt bơm khẩn cấp
+    if (waterLevel < 5 && currentCommand !== 'STOP') {
+        currentCommand = 'STOP';
+        getIo().emit('machine_command', 'STOP');
+        console.log(`[CẢNH BÁO KHẨN CẤP] Nước sắp tràn! Đã phát lệnh ngắt bơm khẩn cấp.`);
+    }
+
     // ESP8266 xác nhận đã nhận lệnh (Acknowledge) hoặc đang rót nước -> tự động reset lệnh về STOP
     if (pourStatus === 'ACK' || (dispensingProgress !== undefined && dispensingProgress > 0)) {
         if (currentCommand !== 'STOP') {
