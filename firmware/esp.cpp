@@ -400,9 +400,9 @@ void loop() {
       wifiDropTime = 0;
     }
 
-    // Bộ hẹn giờ bảo vệ tuyệt đối (Watchdog thời gian 20 giây)
-    if (elapsed >= 20000) {
-      tatBom("Watchdog an toan thoi gian 20s");
+    // Bộ hẹn giờ bảo vệ tuyệt đối (Watchdog thời gian an toàn theo từng Size cốc: S=8s, M=12s, L=16s)
+    if (elapsed >= targetPourTime) {
+      tatBom("Watchdog an toan thoi gian theo Size");
       delay(150);
       guiBaoCaoRotWebSocket(emptyDistance, 100.0, "DONE");
       return;
@@ -411,6 +411,9 @@ void loop() {
     // Đọc cảm biến laser VL53L0X định kỳ 150ms
     if (now - lastDispensingMeasure >= 150) {
       lastDispensingMeasure = now;
+      
+      float timeProgress = ((float)elapsed / (float)targetPourTime) * 100.0;
+      if (timeProgress > 100.0) timeProgress = 100.0;
       
       float distance = -1;
       bool readSuccess = false;
@@ -422,8 +425,8 @@ void loop() {
           if (dist > 2.0 && dist <= emptyDistance + 2.0 && dist <= MAX_PHYSICAL_DISTANCE) {
             float diff = dist - filteredDistance;
             
-            // Bộ lọc tốc độ thay đổi (Rate-of-Change): Ngăn nhiễu nhảy vọt mặt nước dâng > 2cm trong 150ms
-            if (abs(diff) <= 2.0) {
+            // Bộ lọc tốc độ thay đổi (Rate-of-Change): Tăng ngưỡng lên 4.5cm để chấp nhận các dao động ban đầu và nhiễu bọt nước
+            if (abs(diff) <= 4.5) {
               // Bộ lọc làm mịn Exponential Moving Average (EMA) với hệ số alpha = 0.35
               filteredDistance = 0.35 * dist + 0.65 * filteredDistance;
               distance = filteredDistance;
@@ -457,11 +460,14 @@ void loop() {
         float hWater = cupBaseDistance - distance;
         if (hWater < 0) hWater = 0;
         
-        float progress = (hWater / targetHeight) * 100.0;
-        if (progress > 100.0) progress = 100.0;
+        float sensorProgress = (hWater / targetHeight) * 100.0;
+        if (sensorProgress > 100.0) sensorProgress = 100.0;
+        
+        // Tiến trình lai ghép (Hybrid Progress): Tránh bị kẹt 0% do nước dâng chậm hoặc cảm biến trễ
+        float progress = max(sensorProgress, timeProgress);
 
-        Serial.printf("[Sens-Rot] Nuoc: %.1f/%.1f cm | Khoang cach: %.1f cm | Tien trinh: %.0f%%\n", 
-                      hWater, targetHeight, distance, progress);
+        Serial.printf("[Sens-Rot] Nuoc: %.1f/%.1f cm | Laser: %.1f cm | CB: %.0f%% | TG: %.0f%% | Tien trinh: %.0f%%\n", 
+                      hWater, targetHeight, distance, sensorProgress, timeProgress, progress);
 
         // KIỂM TRA ĐIỀU KIỆN TỰ NGẮT AN TOÀN
         bool isDanger = (distance <= SAFE_MIN_DISTANCE);
@@ -487,26 +493,18 @@ void loop() {
           delay(150); // Độ trễ ổn định điện áp và sóng nhiễu
           guiBaoCaoRotWebSocket(distance, 100.0, "DONE");
         } 
-        // Báo cáo tiến trình định kỳ mỗi 1000ms qua WebSocket
-        else if (now - lastDispensingReport >= 1000) {
+        // Báo cáo tiến trình định kỳ mỗi 200ms qua WebSocket (Tăng tần suất để Web cập nhật siêu mượt!)
+        else if (now - lastDispensingReport >= 200) {
           lastDispensingReport = now;
           guiBaoCaoRotWebSocket(distance, progress, "");
         }
       }
-      // CHẾ ĐỘ DỰ PHÒNG (FALLBACK TIMER): Khi cảm biến lỗi/mất tín hiệu liên tục quá 30 lần (~4.5s)
-      else if (!isSensorReady || consecutiveOutliers >= 30) {
-        float timeProgress = ((float)elapsed / (float)targetPourTime) * 100.0;
-        if (timeProgress > 100.0) timeProgress = 100.0;
-
-        Serial.printf("[Rot-Fallback-Timer] %.1f/%.1fs | Tien trinh: %.0f%% (Laser loi)\n", 
-                      elapsed / 1000.0, targetPourTime / 1000.0, timeProgress);
-
-        if (elapsed >= targetPourTime) {
-          tatBom("Hoan thanh theo thoi gian du phong (Fallback)");
-          delay(150);
-          guiBaoCaoRotWebSocket(emptyDistance, 100.0, "DONE");
-        } else if (now - lastDispensingReport >= 1000) {
+      // CHẾ ĐỘ DỰ PHÒNG (FALLBACK TIMER): Khi cảm biến lỗi hoặc nhảy số do bong bóng/nhiễu
+      else {
+        if (now - lastDispensingReport >= 200) {
           lastDispensingReport = now;
+          Serial.printf("[Rot-Fallback-Timer] %.1f/%.1fs | Tien trinh: %.0f%% (Laser hoac DSP nhiễu)\n", 
+                        elapsed / 1000.0, targetPourTime / 1000.0, timeProgress);
           guiBaoCaoRotWebSocket(emptyDistance, timeProgress, "");
         }
       }
