@@ -38,6 +38,7 @@ export default function OrderWizard() {
   // Mức nước của từng bình nước ảo độc lập (Coca-Cola: id=1, Pepsi: id=2)
   const [cocaLevel, setCocaLevel] = useState(5000);
   const [pepsiLevel, setPepsiLevel] = useState(5000);
+  const [countdown, setCountdown] = useState(10);
 
   // Hiển thị lỗi tạm thời (3 giây)
   const showError = (msg) => {
@@ -203,6 +204,41 @@ export default function OrderWizard() {
     };
   }, [order.id, step]);
 
+  // Bộ đếm ngược 10 giây cho phiên thao tác khi đến lượt
+  useEffect(() => {
+    let timerId = null;
+
+    const servingOrder = queueList.find(q => q.status === 'Serving');
+    const firstPaidOrder = queueList.find(q => q.payment_status === 'Paid');
+    const isMyTurn = servingOrder 
+      ? Number(servingOrder.id) === Number(order.id)
+      : (firstPaidOrder && Number(firstPaidOrder.id) === Number(order.id));
+
+    if (step === 4 && isMyTurn) {
+      timerId = setInterval(() => {
+        setCountdown(prev => {
+          if (prev <= 1) {
+            clearInterval(timerId);
+            // Tự động hủy phiên khi hết thời gian
+            handleResetSession();
+            showError("Hết thời gian chờ thao tác (10s)! Hệ thống đã tự động hủy lượt để nhường cho người tiếp theo.");
+            return 10;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    } else {
+      // Đặt lại đếm ngược về 10 khi không ở Step 4 hoặc không phải lượt của mình
+      setCountdown(10);
+    }
+
+    return () => {
+      if (timerId) {
+        clearInterval(timerId);
+      }
+    };
+  }, [step, queueList, order.id]);
+
   // Tạo Order
   const handlePlaceOrder = async () => {
     // Ngăn chặn nếu loại nước được chọn bị hết nước (< 330ml)
@@ -301,7 +337,7 @@ export default function OrderWizard() {
     // Nếu có đơn hàng đang bị kẹt và chưa hoàn tất, chủ động gửi lệnh giải phóng máy về Backend
     if (order.id && !isDone) {
       try {
-        await machineService.completeOrder(order.id);
+        await machineService.completeOrder(order.id, 'Failed');
         console.log("Đã chủ động gửi lệnh giải phóng máy bán nước khỏi đơn hàng cũ.");
       } catch (err) {
         console.error("Lỗi khi gửi lệnh giải phóng máy bán nước:", err);
@@ -529,6 +565,7 @@ export default function OrderWizard() {
       try {
         await machineService.dropCup(order.id);
         setHasDroppedCup(true);
+        setCountdown(10); // Khôi phục đếm ngược về 10 giây để người dùng đặt ly
       } catch (err) {
         showError('Không thể nhả ly nước. Vui lòng thử lại!');
       } finally {
@@ -615,9 +652,14 @@ export default function OrderWizard() {
           
           <div className="mt-3">
             {isMyTurn ? (
-              <span className="inline-block px-3 py-1 bg-emerald-500 text-white text-xs font-extrabold rounded-full animate-bounce shadow-md shadow-emerald-100">
-                ⚡ ĐÃ ĐẾN LƯỢT PHỤC VỤ CỦA BẠN!
-              </span>
+              <div className="space-y-2">
+                <span className="inline-block px-3 py-1 bg-emerald-500 text-white text-xs font-extrabold rounded-full animate-bounce shadow-md shadow-emerald-100">
+                  ⚡ ĐÃ ĐẾN LƯỢT PHỤC VỤ CỦA BẠN!
+                </span>
+                <div className="text-xs font-bold text-red-600 animate-pulse bg-red-50 border border-red-100 rounded-lg p-2.5 mt-2.5 flex items-center justify-center gap-1.5 shadow-sm">
+                  ⏱️ Tự động hủy lượt sau: <span className="text-sm font-black underline">{countdown}s</span>
+                </div>
+              </div>
             ) : (
               <span className="inline-block px-3 py-1 bg-amber-50 text-amber-700 text-xs font-bold rounded-full border border-amber-100">
                 ⏳ Đang chờ máy rảnh... (Còn {peopleAhead} người phía trước)
