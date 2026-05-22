@@ -26,6 +26,49 @@ const initServingState = async () => {
 // Đợi 1 giây để các module cấu hình Pool và Socket.IO sẵn sàng rồi mới khôi phục
 setTimeout(initServingState, 1000);
 
+// Biến theo dõi đơn hàng đứng đầu hàng chờ để phục vụ Watchdog
+let currentFrontOrderId = null;
+let frontOrderStartTime = null;
+
+// Hàm Watchdog tự động quét và giải phóng đơn hàng kẹt ở trạng thái 'Waiting'
+const runWatchdog = async () => {
+    try {
+        const activeOrders = await OrderModel.findActiveOrders();
+        if (activeOrders.length > 0) {
+            const firstOrder = activeOrders[0];
+            
+            // Chỉ giám sát nếu đơn hàng đầu tiên đang ở trạng thái 'Waiting'
+            if (firstOrder.status === 'Waiting') {
+                if (firstOrder.id !== currentFrontOrderId) {
+                    // Cập nhật đơn hàng mới đứng đầu hàng chờ
+                    currentFrontOrderId = firstOrder.id;
+                    frontOrderStartTime = Date.now();
+                    console.log(`[Watchdog] Đơn hàng ID ${firstOrder.id} (SĐT: ${firstOrder.queue_number}) đã lên đầu hàng chờ. Bắt đầu đếm ngược 10 giây...`);
+                } else {
+                    // Đơn hàng cũ vẫn đứng đầu, kiểm tra thời gian trôi qua
+                    const elapsed = Date.now() - frontOrderStartTime;
+                    if (elapsed > 10000) { // 10 giây
+                        console.warn(`[Watchdog Timeout] Đơn hàng ID ${firstOrder.id} (SĐT: ${firstOrder.queue_number}) đã chờ thao tác quá 10 giây. Tự động hoàn tất/hủy để giải phóng hàng chờ...`);
+                        await completeOrder(firstOrder.id, 'Failed');
+                    }
+                }
+            } else {
+                // Nếu đơn hàng đầu tiên đang 'Serving', reset watchdog vì Serving đã có safetyTimeoutTimer riêng
+                currentFrontOrderId = null;
+                frontOrderStartTime = null;
+            }
+        } else {
+            currentFrontOrderId = null;
+            frontOrderStartTime = null;
+        }
+    } catch (err) {
+        console.error('[Watchdog Error] Lỗi kiểm tra hàng chờ tự động:', err);
+    }
+};
+
+// Chạy Watchdog mỗi 1 giây
+setInterval(runWatchdog, 1000);
+
 // Bắt đầu rót nước
 export const dispenseDrink = async (orderId) => {
     const order = await OrderModel.findOrderById(orderId);
@@ -45,18 +88,18 @@ export const dispenseDrink = async (orderId) => {
     currentServingOrderId = orderId;
     currentServingQueueNumber = queue_number;
 
-    // Thiết lập bộ đếm thời gian an toàn 25 giây (Safety Fail-safe Timeout)
+    // Thiết lập bộ đếm thời gian an toàn 10 giây (Safety Fail-safe Timeout cho demo nhanh)
     if (safetyTimeoutTimer) {
         clearTimeout(safetyTimeoutTimer);
     }
     safetyTimeoutTimer = setTimeout(async () => {
-        console.warn(`[SAFETY TIMEOUT] Đơn hàng ID ${orderId} đang rót vượt quá 25 giây mà chưa nhận được tín hiệu hoàn tất. Tiến hành tự động khôi phục an toàn...`);
+        console.warn(`[SAFETY TIMEOUT] Đơn hàng ID ${orderId} đang rót vượt quá 10 giây mà chưa nhận được tín hiệu hoàn tất. Tiến hành tự động khôi phục an toàn...`);
         try {
-            await completeOrder(orderId);
+            await completeOrder(orderId, 'Failed');
         } catch (err) {
             console.error('[SAFETY TIMEOUT ERROR] Không thể tự động khôi phục đơn hàng:', err);
         }
-    }, 25000);
+    }, 10000);
 
     // 3. Báo frontend
     getIo().emit('queue_updated');
@@ -70,9 +113,9 @@ export const dispenseDrink = async (orderId) => {
     return { command: currentCommand };
 };
 
-// Hoàn tất order
-export const completeOrder = async (orderId) => {
-    // Hủy bộ đếm thời gian an toàn nếu đơn hàng hoàn thành bình thường
+// Hoàn tất hoặc Hủy order
+export const completeOrder = async (orderId, targetStatus = 'Done') => {
+    // Hủy bộ đếm thời gian an toàn nếu đơn hàng hoàn thành hoặc hủy
     if (safetyTimeoutTimer) {
         clearTimeout(safetyTimeoutTimer);
         safetyTimeoutTimer = null;
@@ -83,28 +126,30 @@ export const completeOrder = async (orderId) => {
     currentServingOrderId = null;
     currentServingQueueNumber = null;
 
-    // Tự động trừ đi mực nước trong bình chứa ảo tùy theo kích cỡ cốc đã chọn
+    // Tự động trừ đi mực nước trong bình chứa ảo tùy theo kích cỡ cốc đã chọn (Chỉ trừ khi rót thành công 'Done')
     try {
-        const order = await OrderModel.findOrderById(orderId);
-        if (order) {
-            let mlToSubtract = 0;
-            if (order.size === 'S') mlToSubtract = 330;
-            else if (order.size === 'M') mlToSubtract = 500;
-            else if (order.size === 'L') mlToSubtract = 700;
+        if (targetStatus === 'Done') {
+            const order = await OrderModel.findOrderById(orderId);
+            if (order) {
+                let mlToSubtract = 0;
+                if (order.size === 'S') mlToSubtract = 330;
+                else if (order.size === 'M') mlToSubtract = 500;
+                else if (order.size === 'L') mlToSubtract = 700;
 
-            if (mlToSubtract > 0) {
-                // Xác định bình chứa tương ứng (id=1: Coca, id=2: Pepsi)
-                const tankId = order.drink_name.includes("Coca") ? 1 : 2;
-                await MachineModel.subtractWaterLevel(tankId, mlToSubtract);
-                console.log(`[Machine Service] Rót xong! Đã tự động trừ ${mlToSubtract}ml khỏi bình chứa ${order.drink_name} (ID: ${tankId}).`);
+                if (mlToSubtract > 0) {
+                    // Xác định bình chứa tương ứng (id=1: Coca, id=2: Pepsi)
+                    const tankId = order.drink_name.includes("Coca") ? 1 : 2;
+                    await MachineModel.subtractWaterLevel(tankId, mlToSubtract);
+                    console.log(`[Machine Service] Rót xong! Đã tự động trừ ${mlToSubtract}ml khỏi bình chứa ${order.drink_name} (ID: ${tankId}).`);
+                }
             }
         }
     } catch (err) {
         console.error('[Machine Service Error] Lỗi khi trừ nước bình chứa:', err);
     }
 
-    // 1. Đánh dấu order đã hoàn thành
-    await OrderModel.updateOrderStatus(orderId, 'Done');
+    // 1. Đánh dấu trạng thái order ('Done' hoặc 'Failed')
+    await OrderModel.updateOrderStatus(orderId, targetStatus);
 
     // 2. Reset máy về Ready
     await MachineModel.setReady();
@@ -135,6 +180,13 @@ export const dropCup = async (orderId) => {
     currentCommand = "DROP_CUP";
     getIo().emit('machine_command', "DROP_CUP");
     console.log(`[Drop Cup] Đã phát lệnh nhả ly cho Order ID: ${orderId} qua WebSocket`);
+
+    // GIA HẠN WATCHDOG: Khi nhả ly thành công, cập nhật frontOrderStartTime để gia hạn 10 giây trên Backend!
+    if (currentFrontOrderId === orderId) {
+        frontOrderStartTime = Date.now();
+        console.log(`[Watchdog] Gia hạn thêm 10 giây cho Order ID: ${orderId} do đã nhấn nhả ly.`);
+    }
+
     return { command: currentCommand };
 };
 
@@ -191,12 +243,12 @@ export const updateSensor = async (waterLevel, isCupPlaced, dispensingProgress, 
     if (pourStatus === 'CUP_REMOVED') {
         console.log(`[Sensor - CẢNH BÁO KHẨN CẤP] Ly nước bị rút khỏi khay hứng! Đang tự động ngắt bơm và hoàn tất đơn...`);
         if (currentServingOrderId) {
-            await completeOrder(currentServingOrderId);
+            await completeOrder(currentServingOrderId, 'Failed');
         } else {
             const activeOrders = await OrderModel.findActiveOrders();
             const servingOrder = activeOrders.find(o => o.status === 'Serving');
             if (servingOrder) {
-                await completeOrder(servingOrder.id);
+                await completeOrder(servingOrder.id, 'Failed');
             } else {
                 currentCommand = 'STOP';
                 currentServingOrderId = null;

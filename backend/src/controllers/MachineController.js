@@ -14,8 +14,8 @@ export const dispenseDrink = async (req, res) => {
 
 export const completeOrder = async (req, res) => {
     try {
-        const { order_id } = req.body;
-        await MachineService.completeOrder(order_id);
+        const { order_id, status } = req.body;
+        await MachineService.completeOrder(order_id, status);
         res.status(200).json({ success: true, message: 'Hoàn tất order' });
     } catch (error) {
         console.error('[MachineController - completeOrder Error] Lỗi:', error);

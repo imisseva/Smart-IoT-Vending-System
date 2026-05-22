@@ -70,8 +70,8 @@ export const machineService = {
     const response = await apiClient.post('/machine/dispense', { order_id });
     return response.data;
   },
-  completeOrder: async (order_id) => {
-    const response = await apiClient.post('/machine/complete', { order_id });
+  completeOrder: async (order_id, status) => {
+    const response = await apiClient.post('/machine/complete', { order_id, status });
     return response.data;
   },
   dropCup: async (order_id) => {
