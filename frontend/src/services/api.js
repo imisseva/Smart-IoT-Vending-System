@@ -68,5 +68,22 @@ export const machineService = {
   dropCup: async (order_id) => {
     const response = await apiClient.post('/machine/drop-cup', { order_id });
     return response.data;
+  },
+  refillWater: async (id, water_level) => {
+    const response = await apiClient.post('/machine/refill', { id, water_level });
+    return response.data;
+  },
+  getMachineStatus: async () => {
+    const response = await apiClient.get('/machine/status');
+    return response.data;
+  },
+  getAnalytics: async () => {
+    const response = await apiClient.get('/machine/analytics');
+    return response.data;
+  },
+  loginAdmin: async (username, password) => {
+    const response = await apiClient.post('/admin/login', { username, password });
+    return response.data;
   }
 };
+
