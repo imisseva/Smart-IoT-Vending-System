@@ -53,7 +53,7 @@ int bothLowCount = 0; // Đếm số lần cả 2 chân đều LOW liên tiếp
 
 // Chống kích hoạt nhả ly liên tục do nhiễu nguồn hoặc sụt áp
 unsigned long lastCupDropTime = 0;
-const unsigned long CUP_DROP_COOLDOWN = 6000; // Cooldown 6 giây giữa các lần nhả ly
+const unsigned long CUP_DROP_COOLDOWN = 15000; // Cooldown 15 giây giữa các lần nhả ly để phù hợp với thời gian giữ servo 10s
 
 // Watchdog bơm
 unsigned long pumpStartTime = 0;
@@ -149,11 +149,20 @@ void loop() {
         digitalWrite(out2, LOW);
         
         Serial.println("[V7] >>> LENH NHA LY <<<");
-        lcd.setCursor(0, 1);
-        lcd.print("DANG NHA LY...  ");
-        
         cupServo.write(SERVO_RELEASE_ANGLE);
-        delay(1500);
+        
+        // Đếm ngược 10 giây trên LCD và giữ servo mở
+        for (int i = 10; i > 0; i--) {
+          lcd.setCursor(0, 1);
+          lcd.print("NHA LY: ");
+          lcd.print(i);
+          lcd.print("s con lai ");
+          Serial.print("[V7] Dang nha ly... ");
+          Serial.print(i);
+          Serial.println("s");
+          delay(1000);
+        }
+        
         cupServo.write(SERVO_LOCK_ANGLE);
         delay(500);
         

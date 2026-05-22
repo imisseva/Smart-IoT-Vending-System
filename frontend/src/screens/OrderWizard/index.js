@@ -39,6 +39,7 @@ export default function OrderWizard() {
   const [cocaLevel, setCocaLevel] = useState(5000);
   const [pepsiLevel, setPepsiLevel] = useState(5000);
   const [countdown, setCountdown] = useState(10);
+  const [cupCountdown, setCupCountdown] = useState(15);
 
   // Hiển thị lỗi tạm thời (3 giây)
   const showError = (msg) => {
@@ -204,7 +205,7 @@ export default function OrderWizard() {
     };
   }, [order.id, step]);
 
-  // Bộ đếm ngược 10 giây cho phiên thao tác khi đến lượt
+  // Bộ đếm ngược 10 giây cho phiên thao tác khi đến lượt (chỉ hoạt động khi chưa nhả ly)
   useEffect(() => {
     let timerId = null;
 
@@ -214,7 +215,7 @@ export default function OrderWizard() {
       ? Number(servingOrder.id) === Number(order.id)
       : (firstPaidOrder && Number(firstPaidOrder.id) === Number(order.id));
 
-    if (step === 4 && isMyTurn) {
+    if (step === 4 && isMyTurn && !hasDroppedCup) {
       timerId = setInterval(() => {
         setCountdown(prev => {
           if (prev <= 1) {
@@ -228,7 +229,7 @@ export default function OrderWizard() {
         });
       }, 1000);
     } else {
-      // Đặt lại đếm ngược về 10 khi không ở Step 4 hoặc không phải lượt của mình
+      // Đặt lại đếm ngược về 10 khi không ở Step 4 hoặc không phải lượt của mình hoặc đã nhả ly
       setCountdown(10);
     }
 
@@ -237,7 +238,41 @@ export default function OrderWizard() {
         clearInterval(timerId);
       }
     };
-  }, [step, queueList, order.id]);
+  }, [step, queueList, order.id, hasDroppedCup]);
+
+  // Bộ đếm ngược 15 giây để đặt ly sau khi nhả ly (chỉ hoạt động khi chưa phát hiện cốc)
+  useEffect(() => {
+    let timerId = null;
+
+    const servingOrder = queueList.find(q => q.status === 'Serving');
+    const firstPaidOrder = queueList.find(q => q.payment_status === 'Paid');
+    const isMyTurn = servingOrder 
+      ? Number(servingOrder.id) === Number(order.id)
+      : (firstPaidOrder && Number(firstPaidOrder.id) === Number(order.id));
+
+    if (step === 4 && isMyTurn && hasDroppedCup && !isCupPlacedRealtime) {
+      timerId = setInterval(() => {
+        setCupCountdown(prev => {
+          if (prev <= 1) {
+            clearInterval(timerId);
+            handleResetSession();
+            showError("Quá thời gian 15 giây đặt ly! Hệ thống tự động hủy phiên để đảm bảo an toàn.");
+            return 15;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    } else {
+      // Nếu có ly đặt vào hoặc trạng thái khác, đặt lại đếm ngược về 15
+      setCupCountdown(15);
+    }
+
+    return () => {
+      if (timerId) {
+        clearInterval(timerId);
+      }
+    };
+  }, [step, queueList, order.id, hasDroppedCup, isCupPlacedRealtime]);
 
   // Tạo Order
   const handlePlaceOrder = async () => {
@@ -356,6 +391,8 @@ export default function OrderWizard() {
     setIsDone(false);
     setHasDroppedCup(false);
     setIsCupPlacedRealtime(false);
+    setCountdown(10);
+    setCupCountdown(15);
   };
 
   // GIAO DIỆN STEP 1: CHỌN NƯỚC UỐNG
@@ -565,7 +602,7 @@ export default function OrderWizard() {
       try {
         await machineService.dropCup(order.id);
         setHasDroppedCup(true);
-        setCountdown(10); // Khôi phục đếm ngược về 10 giây để người dùng đặt ly
+        setCupCountdown(15); // Khởi tạo đếm ngược 15 giây để người dùng đặt ly
       } catch (err) {
         showError('Không thể nhả ly nước. Vui lòng thử lại!');
       } finally {
@@ -656,9 +693,11 @@ export default function OrderWizard() {
                 <span className="inline-block px-3 py-1 bg-emerald-500 text-white text-xs font-extrabold rounded-full animate-bounce shadow-md shadow-emerald-100">
                   ⚡ ĐÃ ĐẾN LƯỢT PHỤC VỤ CỦA BẠN!
                 </span>
-                <div className="text-xs font-bold text-red-600 animate-pulse bg-red-50 border border-red-100 rounded-lg p-2.5 mt-2.5 flex items-center justify-center gap-1.5 shadow-sm">
-                  ⏱️ Tự động hủy lượt sau: <span className="text-sm font-black underline">{countdown}s</span>
-                </div>
+                {!hasDroppedCup && (
+                  <div className="text-xs font-bold text-red-600 animate-pulse bg-red-50 border border-red-100 rounded-lg p-2.5 mt-2.5 flex items-center justify-center gap-1.5 shadow-sm">
+                    ⏱️ Tự động hủy lượt sau: <span className="text-sm font-black underline">{countdown}s</span>
+                  </div>
+                )}
               </div>
             ) : (
               <span className="inline-block px-3 py-1 bg-amber-50 text-amber-700 text-xs font-bold rounded-full border border-amber-100">
@@ -696,18 +735,27 @@ export default function OrderWizard() {
                         <span>✓</span> Cảm biến phát hiện ly nước đúng chỗ! Sẵn sàng rót.
                       </div>
                     ) : (
-                      <div className="bg-amber-50 border border-amber-200 text-amber-700 rounded-xl p-3 text-center text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm">
-                        <span className="animate-ping w-2 h-2 rounded-full bg-amber-500 mr-1"></span>
-                        Vui lòng đặt ly nước của bạn vào khay rót...
+                      <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl p-3 text-center text-xs font-bold flex flex-col items-center justify-center gap-1 shadow-sm animate-pulse">
+                        <div className="flex items-center justify-center gap-1.5">
+                          <span className="relative flex h-2 w-2">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                            <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
+                          </span>
+                          <span>⚠️ Chưa bỏ ly vô khay! Vui lòng đặt ly vào khay rót</span>
+                        </div>
+                        <span className="text-[11px] text-red-600 mt-1 font-extrabold bg-red-100/50 px-2 py-0.5 rounded">
+                          ⏱️ Tự động hủy sau: {cupCountdown} giây
+                        </span>
                       </div>
                     )}
 
                     <button 
+                      disabled={!isCupPlacedRealtime}
                       onClick={handleDispense} 
                       className={`w-full py-4 text-white font-black text-sm rounded-xl transition-all shadow-lg active:scale-[0.98] cursor-pointer flex items-center justify-center gap-2 ${
                         isCupPlacedRealtime 
                           ? "bg-emerald-500 hover:bg-emerald-600 shadow-emerald-100 animate-bounce" 
-                          : "bg-slate-400 hover:bg-slate-500 shadow-slate-100"
+                          : "bg-slate-400 shadow-slate-100 cursor-not-allowed opacity-70"
                       }`}
                     >
                       🥤 BẮT ĐẦU RÓT NƯỚC GIẢI KHÁT
