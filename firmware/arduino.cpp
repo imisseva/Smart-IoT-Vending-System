@@ -1,170 +1,238 @@
 // FILE: arduino.cpp
 // Chạy trên Arduino Uno
+// PHIÊN BẢN V7: Continuous Level + Hysteresis (Chống giật)
+//
+// NGUYÊN TẮC:
+// - ESP giữ chân LOW = bơm chạy, ESP giữ chân HIGH = bơm tắt
+// - Arduino có cơ chế "dính trạng thái" (Hysteresis):
+//   + BẬT BƠM: Chỉ cần đọc LOW 3 lần liên tiếp (~15ms) → BẬT ngay
+//   + TẮT BƠM: Phải đọc HIGH ít nhất 40 lần liên tiếp (~200ms) → mới TẮT
+//   + Điều này đảm bảo bơm chạy mượt, không bị giật do nhiễu ngắn hạn
+//
+// KẾT NỐI DÂY:
+// - Chân 7 (in1) ← D1 ESP (Coca)   - Chân 4 (out1) → IN1 Relay
+// - Chân 6 (in2) ← D2 ESP (Pepsi)  - Chân 5 (out2) → IN2 Relay
+// - Chân 9 → Servo                  - GND chung ESP + Uno
+
 #include <Wire.h> 
 #include <LiquidCrystal_I2C.h>
 #include <Servo.h>
 
-// Địa chỉ LCD 0x27
 LiquidCrystal_I2C lcd(0x27, 16, 2);
+Servo cupServo;
 
-Servo cupServo;         // Khai báo đối tượng Servo điều khiển nhả ly
-const int servoPin = 9; // Dây tín hiệu Servo cắm vào chân D9 Uno
+const int servoPin = 9;
+const int in1 = 7;  // Coca trigger từ ESP
+const int in2 = 6;  // Pepsi trigger từ ESP
+const int out1 = 4; // Relay Coca
+const int out2 = 5; // Relay Pepsi
 
-const int in1 = 7; // Từ D1 của ESP (Lệnh Coca)
-const int in2 = 6; // Từ D2 của ESP (Lệnh Pepsi)
-const int out1 = 4; // Tới IN1 Relay (Bơm Coca)
-const int out2 = 5; // Tới IN2 Relay (Bơm Pepsi)
+const int SERVO_LOCK_ANGLE = 0;
+const int SERVO_RELEASE_ANGLE = 90;
 
+// ===== CƠ CHẾ HYSTERESIS (CHỐNG GIẬT) =====
+// Đếm số lần liên tiếp đọc được trạng thái mới
+// Phải vượt ngưỡng mới chuyển trạng thái
+int highCount1 = 0; // Số lần liên tiếp in1 đọc HIGH
+int highCount2 = 0; // Số lần liên tiếp in2 đọc HIGH
+int lowCount1 = 0;  // Số lần liên tiếp in1 đọc LOW
+int lowCount2 = 0;  // Số lần liên tiếp in2 đọc LOW
+
+const int TURN_ON_THRESHOLD = 3;    // 3 lần LOW liên tiếp (~15ms) → BẬT
+const int TURN_OFF_THRESHOLD = 15;  // 15 lần HIGH liên tiếp (~75ms) → TẮT (Giảm độ trễ ngắt bơm xuống 75ms)
+const int DROP_CUP_THRESHOLD = 240; // 240 lần cả 2 LOW liên tiếp (~1.2s) → NHẢ LY (Đo chuẩn hơn để tránh nhiễu khởi động)
+
+// Trạng thái logic đã được lọc (sau hysteresis)
+bool pin1Active = false; // true = ESP đang kéo LOW chân 1
+bool pin2Active = false; // true = ESP đang kéo LOW chân 2
+
+// Trạng thái máy
 int lastState = -1;
-bool isDispensing = false; // Trạng thái đang thực hiện chu trình rót nước
+bool cupDropDone = false;
+int bothLowCount = 0; // Đếm số lần cả 2 chân đều LOW liên tiếp
 
-// Watchdog ngắt bơm an toàn (Failsafe Watchdog)
+// Chống kích hoạt nhả ly liên tục do nhiễu nguồn hoặc sụt áp
+unsigned long lastCupDropTime = 0;
+const unsigned long CUP_DROP_COOLDOWN = 6000; // Cooldown 6 giây giữa các lần nhả ly
+
+// Watchdog bơm
 unsigned long pumpStartTime = 0;
-bool isPumpRunning = false;
-const unsigned long MAX_PUMP_TIME = 15000; // 15 giây chạy bơm liên tục tối đa
-bool pumpSafetyTripped = false;
-
-// Góc quay của Servo (Có thể điều chỉnh lại cho khớp với cơ cấu cơ khí của bạn)
-const int SERVO_LOCK_ANGLE = 0;    // Góc khóa ly (Không cho rơi)
-const int SERVO_RELEASE_ANGLE = 90; // Góc mở chốt (Nhả 1 ly xuống)
+bool pumpTimerActive = false;
+const unsigned long MAX_PUMP_TIME = 20000;
 
 void setup() {
   Serial.begin(115200);
-  pinMode(in1, INPUT); 
-  pinMode(in2, INPUT);
   
-  // Thiết lập ban đầu cho các bơm tắt hoàn toàn (Cả hai đều Active HIGH: LOW = Tắt, HIGH = Bật)
+  pinMode(in1, INPUT_PULLUP); 
+  pinMode(in2, INPUT_PULLUP);
+  
   digitalWrite(out1, LOW); 
   digitalWrite(out2, LOW); 
   pinMode(out1, OUTPUT); 
   pinMode(out2, OUTPUT);
 
-  // Khởi tạo Servo
   cupServo.attach(servoPin);
-  cupServo.write(SERVO_LOCK_ANGLE); // Khóa chốt ly lúc khởi động
+  cupServo.write(SERVO_LOCK_ANGLE);
   
-  // Khởi tạo LCD
+  // Khởi động I2C và kích hoạt tính năng CHỐNG TREO CHIP (I2C Timeout) chuẩn công nghiệp
+  Wire.begin();
+  Wire.setWireTimeout(3000, true); // Chờ tối đa 3ms, tự động reset bus I2C nếu bị nhiễu động cơ!
+
   lcd.init();
   lcd.backlight();
   lcd.setCursor(0, 0);
-  lcd.print("MAY BAN NUOC V5");
+  lcd.print("MAY BAN NUOC V7");
   lcd.setCursor(0, 1);
-  lcd.print("DANG SAN SANG...");
-  Serial.println("Arduino Uno Da San Sang!");
+  lcd.print("SAN SANG........");
+  
+  Serial.println("=== Arduino V7 - Hysteresis Mode ===");
+  Serial.println("BatBom: 3x LOW | TatBom: 40x HIGH | NhaLy: 60x ca2LOW");
 }
 
 void loop() {
-  bool cmd1 = digitalRead(in1);
-  bool cmd2 = digitalRead(in2);
+  // ĐỌC TRỰC TIẾP (không debounce phức tạp — hysteresis sẽ lo)
+  bool raw1 = (digitalRead(in1) == LOW); // true = đang bị kéo LOW
+  bool raw2 = (digitalRead(in2) == LOW);
   
-  // 0. Failsafe watchdog cho bơm nước
-  bool isCommandingPump = ((cmd1 && !cmd2) || (!cmd1 && cmd2));
-  
-  if (isCommandingPump) {
-    if (!isPumpRunning) {
-      isPumpRunning = true;
-      pumpStartTime = millis();
-    } else {
-      if (millis() - pumpStartTime > MAX_PUMP_TIME) {
-        if (!pumpSafetyTripped) {
-          pumpSafetyTripped = true;
-          Serial.println("[LOI KHAN CAP] Bơm chạy liên tục vượt ngưỡng 15s. Đã kích hoạt chốt bảo vệ ngắt bơm!");
-          
-          lcd.clear();
-          lcd.setCursor(0, 0);
-          lcd.print("LOI KHAN CAP!!! ");
-          lcd.setCursor(0, 1);
-          lcd.print("QUET GIO HAN PUMP");
-        }
-      }
+  // ===== CẬP NHẬT BỘ ĐẾM HYSTERESIS CHO CHÂN 1 =====
+  if (raw1) {
+    lowCount1++;
+    highCount1 = 0;
+    // Chuyển sang Active nếu đủ ngưỡng BẬT
+    if (!pin1Active && lowCount1 >= TURN_ON_THRESHOLD) {
+      pin1Active = true;
+      Serial.println("[V7] Chan 1 (Coca): ACTIVE");
     }
   } else {
-    isPumpRunning = false;
-    // Tự động khôi phục chế độ an toàn khi ESP dừng kích hoạt (cả 2 chân LOW)
-    if (pumpSafetyTripped && !cmd1 && !cmd2) {
-      pumpSafetyTripped = false;
-      Serial.println("[An toàn] Đã khôi phục trạng thái sẵn sàng sau khi ngắt khẩn cấp.");
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print("MAY BAN NUOC V5");
-      lcd.setCursor(0, 1);
-      lcd.print("DANG SAN SANG...");
-      lastState = -1; // Buộc vẽ lại trạng thái
+    highCount1++;
+    lowCount1 = 0;
+    // Chuyển sang Idle nếu đủ ngưỡng TẮT (khó hơn nhiều so với bật)
+    if (pin1Active && highCount1 >= TURN_OFF_THRESHOLD) {
+      pin1Active = false;
+      Serial.println("[V7] Chan 1 (Coca): IDLE");
     }
   }
-
-  // 1. PHÁT HIỆN LỆNH LẤY LY (Cả hai chân cùng HIGH từ ESP8266)
-  if (cmd1 && cmd2) {
-    delay(150); // Bộ lọc chống nhiễu: Đợi 150ms xem tín hiệu có ổn định không
-    if (digitalRead(in1) && digitalRead(in2)) { // Đo lại lần nữa để chắc chắn là lệnh nhả ly thật sự
-      // Đảm bảo cả hai bơm đều TẮT khi đang nhả ly
-      digitalWrite(out1, LOW);
-      digitalWrite(out2, LOW);
-      
-      // Cập nhật LCD báo nhả ly
-      lcd.setCursor(0, 1);
-      lcd.print("DANG NHA LY...  ");
-      Serial.println("[Hành động] Đang thực hiện nhả ly...");
-      
-      // Kích hoạt Servo nhả ly
-      cupServo.write(SERVO_RELEASE_ANGLE); // Mở chốt nhả ly
-      delay(1500);                         // Đợi 1.5 giây cho ly rơi xuống khay
-      cupServo.write(SERVO_LOCK_ANGLE);    // Khóa chốt lại
-      delay(500);                          // Đợi ổn định chốt
-      
-      lcd.setCursor(0, 1);
-      lcd.print("DA NHA LY!      ");
-      Serial.println("[Hành động] Đã nhả ly xong.");
-      isDispensing = false;
+  
+  // ===== CẬP NHẬT BỘ ĐẾM HYSTERESIS CHO CHÂN 2 =====
+  if (raw2) {
+    lowCount2++;
+    highCount2 = 0;
+    if (!pin2Active && lowCount2 >= TURN_ON_THRESHOLD) {
+      pin2Active = true;
+      Serial.println("[V7] Chan 2 (Pepsi): ACTIVE");
+    }
+  } else {
+    highCount2++;
+    lowCount2 = 0;
+    if (pin2Active && highCount2 >= TURN_OFF_THRESHOLD) {
+      pin2Active = false;
+      Serial.println("[V7] Chan 2 (Pepsi): IDLE");
     }
   }
-  // 2. PHÁT HIỆN LỆNH RÓT NƯỚC (Chỉ một trong hai chân HIGH)
-  else if (isCommandingPump) {
-    if (pumpSafetyTripped) {
-      // Ép tắt bơm nếu đã kích hoạt chốt bảo vệ
-      digitalWrite(out1, LOW);
-      digitalWrite(out2, LOW);
-    } else {
-      isDispensing = true;
-      // Điều khiển đóng ngắt Relay bơm theo tín hiệu thời gian thực từ ESP (Đồng bộ Active HIGH cho cả hai)
-      digitalWrite(out1, cmd1); 
-      digitalWrite(out2, cmd2);
+  
+  // ===== ĐẾM CẢ HAI CHÂN LOW LIÊN TỤC (Phát hiện lệnh nhả ly) =====
+  if (raw1 && raw2) {
+    bothLowCount++;
+  } else {
+    bothLowCount = 0;
+  }
+  
+  // ===== ĐIỀU KHIỂN RELAY DỰA TRÊN TRẠNG THÁI ĐÃ LỌC =====
+  
+  // NHẬN DIỆN LỆNH NHẢ LY: Cả 2 chân LOW liên tục >= 1.2s
+  if (bothLowCount >= DROP_CUP_THRESHOLD && pin1Active && pin2Active) {
+    if (!cupDropDone) {
+      if (millis() - lastCupDropTime >= CUP_DROP_COOLDOWN) {
+        lastCupDropTime = millis();
+        
+        digitalWrite(out1, LOW);
+        digitalWrite(out2, LOW);
+        
+        Serial.println("[V7] >>> LENH NHA LY <<<");
+        lcd.setCursor(0, 1);
+        lcd.print("DANG NHA LY...  ");
+        
+        cupServo.write(SERVO_RELEASE_ANGLE);
+        delay(1500);
+        cupServo.write(SERVO_LOCK_ANGLE);
+        delay(500);
+        
+        lcd.setCursor(0, 1);
+        lcd.print("DA NHA LY OK!   ");
+        Serial.println("[V7] Da nha ly xong.");
+        
+        cupDropDone = true;
+        lastState = 1;
+      } else {
+        // Bỏ qua kích hoạt nếu chưa qua thời gian giãn cách
+        Serial.println("[V7] Canh bao: Lenh nha ly bi chan do trong thoi gian cooldown!");
+        cupDropDone = true; // Chan kich hoat lai trong phien hien tai
+      }
     }
   }
-  // 3. KHÔNG CÓ LỆNH HOẶC LỆNH DỪNG (Cả hai chân LOW)
-  else {
-    // Tắt cả hai bơm
+  // BƠM COCA: Chỉ chân 1 active, chân 2 không active
+  else if (pin1Active && !pin2Active) {
+    cupDropDone = false;
+    digitalWrite(out1, HIGH);
+    digitalWrite(out2, LOW);
+    
+    if (!pumpTimerActive) {
+      pumpTimerActive = true;
+      pumpStartTime = millis();
+      Serial.println("[V7] >>> BAT BOM COCA <<<");
+    }
+    if (lastState != 2) {
+      lcd.setCursor(0, 1);
+      lcd.print("ROT COCA-COLA...");
+      lastState = 2;
+    }
+  }
+  // BƠM PEPSI: Chỉ chân 2 active, chân 1 không active
+  else if (!pin1Active && pin2Active) {
+    cupDropDone = false;
+    digitalWrite(out1, LOW);
+    digitalWrite(out2, HIGH);
+    
+    if (!pumpTimerActive) {
+      pumpTimerActive = true;
+      pumpStartTime = millis();
+      Serial.println("[V7] >>> BAT BOM PEPSI <<<");
+    }
+    if (lastState != 3) {
+      lcd.setCursor(0, 1);
+      lcd.print("ROT PEPSI...    ");
+      lastState = 3;
+    }
+  }
+  // KHÔNG CÓ GÌ ACTIVE: Tắt hết
+  else if (!pin1Active && !pin2Active) {
+    cupDropDone = false;
     digitalWrite(out1, LOW);
     digitalWrite(out2, LOW);
     
-    if (isDispensing) {
-      isDispensing = false;
-      Serial.println("[Hành động] Đã rót xong, khôi phục trạng thái sẵn sàng.");
+    if (pumpTimerActive) {
+      pumpTimerActive = false;
+      Serial.println("[V7] >>> TAT BOM <<<");
     }
-  }
-
-  // 4. HIỂN THỊ TRẠNG THÁI LÊN LCD (Chỉ in khi thay đổi trạng thái để không bị lác màn hình)
-  if (!pumpSafetyTripped) {
-    int currentState = 0; // Trạng thái sẵn sàng
-    if (cmd1 && cmd2) {
-      currentState = 1; // Đang nhả ly
-    } else if (isDispensing) {
-      if (cmd1) currentState = 2;      // Đang rót Coca-Cola
-      else if (cmd2) currentState = 3; // Đang rót Pepsi
-    }
-
-    if (currentState != lastState) {
+    if (lastState != 0) {
       lcd.setCursor(0, 1);
-      if (currentState == 1) {
-        // Đã in chữ "DA NHA LY!" ở trên nên không cần in đè ở đây
-      } else if (currentState == 2) {
-        lcd.print("ROT COCA-COLA...");
-      } else if (currentState == 3) {
-        lcd.print("ROT PEPSI...    ");
-      } else {
-        lcd.print("DANG SAN SANG...");
-      }
-      lastState = currentState;
+      lcd.print("SAN SANG........");
+      lastState = 0;
     }
   }
+  
+  // WATCHDOG: Tắt bơm nếu chạy quá 20 giây
+  if (pumpTimerActive && (millis() - pumpStartTime > MAX_PUMP_TIME)) {
+    digitalWrite(out1, LOW);
+    digitalWrite(out2, LOW);
+    pumpTimerActive = false;
+    pin1Active = false;
+    pin2Active = false;
+    Serial.println("[V7] !!! CANH BAO: Bom qua 20s - NGAT !!!");
+    lcd.setCursor(0, 1);
+    lcd.print("LOI: QUA 20S!!! ");
+    lastState = -1;
+  }
+  
+  delay(5); // Vòng lặp ~5ms → 200 lần/giây
 }

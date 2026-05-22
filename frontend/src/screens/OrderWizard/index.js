@@ -100,15 +100,18 @@ export default function OrderWizard() {
       }
     });
     socket.on('sensor_update', (data) => {
-      if (data && typeof data.is_cup_placed !== 'undefined') {
-        setIsCupPlacedRealtime(data.is_cup_placed);
-      }
-      if (data && typeof data.dispensing_progress !== 'undefined') {
-        setPourProgress(data.dispensing_progress);
-        setIsPouring(true);
-        if (data.dispensing_progress >= 100) {
-          setIsPouring(false);
-          setIsDone(true);
+      // Chỉ cập nhật tiến trình và trạng thái cốc nếu sự kiện realtime thuộc về chính đơn hàng này
+      if (data && order.id && Number(data.order_id) === Number(order.id)) {
+        if (typeof data.is_cup_placed !== 'undefined') {
+          setIsCupPlacedRealtime(data.is_cup_placed);
+        }
+        if (typeof data.dispensing_progress !== 'undefined') {
+          setPourProgress(data.dispensing_progress);
+          setIsPouring(true);
+          if (data.dispensing_progress >= 100) {
+            setIsPouring(false);
+            setIsDone(true);
+          }
         }
       }
     });

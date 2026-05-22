@@ -20,11 +20,14 @@ export const setReady = async () => {
 
 // Cập nhật mực nước từ cảm biến
 export const updateWaterLevel = async (waterLevel) => {
+    const parsed = parseFloat(waterLevel);
+    const roundedLevel = isNaN(parsed) ? 0 : Math.round(parsed);
+
     await pool.query(
         `INSERT INTO Machine_Status (id, water_level, machine_state, updated_at) 
          VALUES (1, $1, 'Ready', CURRENT_TIMESTAMP)
          ON CONFLICT (id) DO UPDATE 
          SET water_level = EXCLUDED.water_level, updated_at = CURRENT_TIMESTAMP`,
-        [waterLevel]
+        [roundedLevel]
     );
 };

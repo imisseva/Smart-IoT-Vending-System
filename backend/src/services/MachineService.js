@@ -3,6 +3,27 @@ import * as OrderModel from '../models/OrderModel.js';
 import * as MachineModel from '../models/MachineModel.js';
 
 let currentCommand = "STOP";
+let currentServingOrderId = null;
+let currentServingQueueNumber = null;
+let safetyTimeoutTimer = null;
+
+// Khôi phục trạng thái đang rót từ DB khi khởi động lại server
+const initServingState = async () => {
+    try {
+        const activeOrders = await OrderModel.findActiveOrders();
+        const servingOrder = activeOrders.find(o => o.status === 'Serving');
+        if (servingOrder) {
+            currentServingOrderId = servingOrder.id;
+            currentServingQueueNumber = servingOrder.queue_number;
+            console.log(`[Init] Đã khôi phục trạng thái rót nước từ DB: ID ${currentServingOrderId} | Số thứ tự ${currentServingQueueNumber}`);
+        }
+    } catch (err) {
+        console.error('[Init Error] Không thể khôi phục trạng thái rót nước:', err);
+    }
+};
+
+// Đợi 1 giây để các module cấu hình Pool và Socket.IO sẵn sàng rồi mới khôi phục
+setTimeout(initServingState, 1000);
 
 // Bắt đầu rót nước
 export const dispenseDrink = async (orderId) => {
@@ -19,6 +40,23 @@ export const dispenseDrink = async (orderId) => {
     // 2. Cập nhật Machine_Status sang Dispensing
     await MachineModel.setDispensing(queue_number);
 
+    // Ghi nhận thông tin đơn hàng đang rót vào RAM
+    currentServingOrderId = orderId;
+    currentServingQueueNumber = queue_number;
+
+    // Thiết lập bộ đếm thời gian an toàn 25 giây (Safety Fail-safe Timeout)
+    if (safetyTimeoutTimer) {
+        clearTimeout(safetyTimeoutTimer);
+    }
+    safetyTimeoutTimer = setTimeout(async () => {
+        console.warn(`[SAFETY TIMEOUT] Đơn hàng ID ${orderId} đang rót vượt quá 25 giây mà chưa nhận được tín hiệu hoàn tất. Tiến hành tự động khôi phục an toàn...`);
+        try {
+            await completeOrder(orderId);
+        } catch (err) {
+            console.error('[SAFETY TIMEOUT ERROR] Không thể tự động khôi phục đơn hàng:', err);
+        }
+    }, 25000);
+
     // 3. Báo frontend
     getIo().emit('queue_updated');
 
@@ -30,7 +68,15 @@ export const dispenseDrink = async (orderId) => {
 
 // Hoàn tất order
 export const completeOrder = async (orderId) => {
+    // Hủy bộ đếm thời gian an toàn nếu đơn hàng hoàn thành bình thường
+    if (safetyTimeoutTimer) {
+        clearTimeout(safetyTimeoutTimer);
+        safetyTimeoutTimer = null;
+    }
+
     currentCommand = "STOP";
+    currentServingOrderId = null;
+    currentServingQueueNumber = null;
 
     // 1. Đánh dấu order đã hoàn thành
     await OrderModel.updateOrderStatus(orderId, 'Done');
@@ -64,6 +110,10 @@ export const getCommand = () => {
 export const updateSensor = async (waterLevel, isCupPlaced, dispensingProgress, pourStatus) => {
     console.log(`[Sensor] Mực nước: ${waterLevel} cm | Đã đặt ly: ${isCupPlaced} | Tiến trình: ${dispensingProgress}% | Trạng thái: ${pourStatus}`);
 
+    // Lưu giữ thông tin đơn hàng đang hoạt động trước khi bị xóa bởi hàm completeOrder
+    const activeOrderId = currentServingOrderId;
+    const activeQueueNumber = currentServingQueueNumber;
+
     // An toàn: Nếu nước quá đầy (khoảng cách < 5cm) → tắt bơm khẩn cấp
     if (waterLevel < 5 && currentCommand !== 'STOP') {
         currentCommand = 'STOP';
@@ -84,35 +134,49 @@ export const updateSensor = async (waterLevel, isCupPlaced, dispensingProgress, 
     // Xử lý tự động hoàn thành khi máy báo cáo "DONE"
     if (pourStatus === 'DONE') {
         console.log(`[Sensor] Máy đã rót xong nước! Đang tự động hoàn tất order...`);
-        const activeOrders = await OrderModel.findActiveOrders();
-        const servingOrder = activeOrders.find(o => o.status === 'Serving');
-        if (servingOrder) {
-            await completeOrder(servingOrder.id);
+        if (currentServingOrderId) {
+            await completeOrder(currentServingOrderId);
         } else {
-            currentCommand = 'STOP';
-            await MachineModel.setReady();
-            getIo().emit('queue_updated');
+            const activeOrders = await OrderModel.findActiveOrders();
+            const servingOrder = activeOrders.find(o => o.status === 'Serving');
+            if (servingOrder) {
+                await completeOrder(servingOrder.id);
+            } else {
+                currentCommand = 'STOP';
+                currentServingOrderId = null;
+                currentServingQueueNumber = null;
+                await MachineModel.setReady();
+                getIo().emit('queue_updated');
+            }
         }
     }
 
     // Xử lý khẩn cấp khi người dùng rút ly trong lúc rót nước
     if (pourStatus === 'CUP_REMOVED') {
         console.log(`[Sensor - CẢNH BÁO KHẨN CẤP] Ly nước bị rút khỏi khay hứng! Đang tự động ngắt bơm và hoàn tất đơn...`);
-        const activeOrders = await OrderModel.findActiveOrders();
-        const servingOrder = activeOrders.find(o => o.status === 'Serving');
-        if (servingOrder) {
-            await completeOrder(servingOrder.id);
+        if (currentServingOrderId) {
+            await completeOrder(currentServingOrderId);
         } else {
-            currentCommand = 'STOP';
-            await MachineModel.setReady();
-            getIo().emit('queue_updated');
+            const activeOrders = await OrderModel.findActiveOrders();
+            const servingOrder = activeOrders.find(o => o.status === 'Serving');
+            if (servingOrder) {
+                await completeOrder(servingOrder.id);
+            } else {
+                currentCommand = 'STOP';
+                currentServingOrderId = null;
+                currentServingQueueNumber = null;
+                await MachineModel.setReady();
+                getIo().emit('queue_updated');
+            }
         }
     }
 
-    // Báo frontend realtime, gửi kèm cả phần trăm tiến trình
+    // Báo frontend realtime, gửi kèm cả phần trăm tiến trình và ID đơn hàng đang phục vụ để cô lập phiên người dùng
     getIo().emit('sensor_update', { 
         water_level: waterLevel, 
         is_cup_placed: isCupPlaced,
-        dispensing_progress: dispensingProgress !== undefined ? parseInt(dispensingProgress) : undefined
+        dispensing_progress: dispensingProgress !== undefined ? parseInt(dispensingProgress) : undefined,
+        order_id: activeOrderId,
+        queue_number: activeQueueNumber
     });
 };

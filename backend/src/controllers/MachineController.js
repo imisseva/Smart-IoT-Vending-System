@@ -6,6 +6,7 @@ export const dispenseDrink = async (req, res) => {
         const result = await MachineService.dispenseDrink(order_id);
         res.status(200).json({ success: true, message: 'Hệ thống bắt đầu rót nước', command: result.command });
     } catch (error) {
+        console.error('[MachineController - dispenseDrink Error] Lỗi:', error);
         const status = error.message === 'Không tìm thấy order' ? 404 : 500;
         res.status(status).json({ success: false, error: error.message });
     }
@@ -17,6 +18,7 @@ export const completeOrder = async (req, res) => {
         await MachineService.completeOrder(order_id);
         res.status(200).json({ success: true, message: 'Hoàn tất order' });
     } catch (error) {
+        console.error('[MachineController - completeOrder Error] Lỗi:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 };
@@ -31,6 +33,7 @@ export const updateSensor = async (req, res) => {
         await MachineService.updateSensor(water_level, is_cup_placed, dispensing_progress, pour_status);
         res.json({ success: true });
     } catch (error) {
+        console.error('[MachineController - updateSensor Error] Lỗi:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 };
@@ -41,6 +44,7 @@ export const dropCup = async (req, res) => {
         const result = await MachineService.dropCup(order_id);
         res.status(200).json({ success: true, message: 'Đang nhả ly', command: result.command });
     } catch (error) {
+        console.error('[MachineController - dropCup Error] Lỗi:', error);
         const status = error.message === 'Không tìm thấy order' ? 404 : 500;
         res.status(status).json({ success: false, error: error.message });
     }
