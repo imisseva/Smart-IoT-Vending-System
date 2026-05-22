@@ -1,7 +1,7 @@
 // FILE: esprelay.cpp
 // Dành cho ESP8266
 // Kết nối:
-// D1 (GPIO5) nối với chân 7 của Arduino Uno
+// D1 (GPIO5) nối với chân 10 của Arduino Uno
 // D2 (GPIO4) nối với chân 6 của Arduino Uno
 
 const int trigger1 = D1; 

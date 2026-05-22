@@ -22,7 +22,7 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);
 Servo cupServo;
 
 const int servoPin = 9;
-const int in1 = 7;  // Coca trigger từ ESP
+const int in1 = 10;  // Coca trigger từ ESP
 const int in2 = 6;  // Pepsi trigger từ ESP
 const int out1 = 3; // Relay Coca (Chuyển sang chân Pin 3 lành lặn vì Pin 4 đã bị cháy)
 const int out2 = 5; // Relay Pepsi
@@ -86,7 +86,7 @@ void setup() {
   lcd.print("SAN SANG........");
   
   Serial.println("=== Arduino V7 - Hysteresis Mode ===");
-  Serial.println("BatBom: 3x LOW | TatBom: 40x HIGH | NhaLy: 60x ca2LOW");
+  Serial.println("BatBom: 3x LOW | TatBom: 15x HIGH | NhaLy: 240x ca2LOW");
 }
 
 void loop() {

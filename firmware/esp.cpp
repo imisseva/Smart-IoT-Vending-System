@@ -10,7 +10,7 @@
 // - Duy trì kết nối bằng cơ chế bắt tay Engine.IO v4 và Ping-Pong Heartbeat tự động.
 //
 // KẾT NỐI DÂY:
-// - D1 (GPIO5) → Nối vào chân 7 Arduino Uno (Lệnh Coca)
+// - D1 (GPIO5) → Nối vào chân 10 Arduino Uno (Lệnh Coca)
 // - D2 (GPIO4) → Nối vào chân 6 Arduino Uno (Lệnh Pepsi)
 // - D5 (GPIO14) → Chân SDA của cảm biến laser VL53L0X
 // - D6 (GPIO12) → Chân SCL của cảm biến laser VL53L0X
@@ -73,8 +73,12 @@ int consecutiveTargetCount = 0;
 int consecutiveDangerCount = 0;
 int consecutiveOutliers = 0;
 
+// Trạng thái nhả ly phi tuần tự (Non-blocking)
+bool isDropCupActive = false;
+unsigned long dropCupStartTime = 0;
+
 // Điều khiển Arduino Uno
-const int triggerCoca = 5;  // GPIO5 (D1) → Chân 7 Uno
+const int triggerCoca = 5;  // GPIO5 (D1) → Chân 10 Uno
 const int triggerPepsi = 4; // GPIO4 (D2) → Chân 6 Uno
 
 // ============================================================
@@ -288,21 +292,17 @@ void xuLyLenh(String command) {
   
   // B. LỆNH NHẢ LY (DROP_CUP)
   else if (command == "DROP_CUP") {
-    Serial.println("=== BAT DAU QUY TRINH NHA LY (WebSockets) ===");
+    Serial.println("=== BAT DAU QUY TRINH NHA LY (WebSockets - Non-blocking) ===");
     guiBaoCaoRotWebSocket(distance != -1 ? distance : emptyDistance, 0.0, "ACK");
     
-    // Kích hoạt nhả ly (Kéo cả 2 chân xuống LOW trong 2.5 giây)
+    // Kích hoạt nhả ly (Kéo cả 2 chân xuống LOW và sử dụng bộ đếm thời gian phi tuần tự)
     pinMode(triggerCoca, OUTPUT);
     digitalWrite(triggerCoca, LOW);
     pinMode(triggerPepsi, OUTPUT);
     digitalWrite(triggerPepsi, LOW);
     
-    delay(2500);
-    
-    // Đưa về trạng thái INPUT an toàn
-    pinMode(triggerCoca, INPUT);
-    pinMode(triggerPepsi, INPUT);
-    Serial.println("=== HOAN TAT QUY TRINH NHA LY ===");
+    isDropCupActive = true;
+    dropCupStartTime = millis();
   }
   
   // C. LỆNH STOP KHẨN CẤP
@@ -369,6 +369,16 @@ void loop() {
   webSocket.loop();
   
   unsigned long now = millis();
+
+  // Xử lý hoàn tất nhả ly phi tuần tự (Non-blocking)
+  if (isDropCupActive) {
+    if (now - dropCupStartTime >= 2500) {
+      pinMode(triggerCoca, INPUT);
+      pinMode(triggerPepsi, INPUT);
+      isDropCupActive = false;
+      Serial.println("=== HOAN TAT QUY TRINH NHA LY (Non-blocking) ===");
+    }
+  }
 
   // ============================================================
   // LUỒNG 1: ĐANG RÓT NƯỚC (ĐO TẦN SUẤT CAO 150ms ĐỂ TỰ NGẮT CHÍNH XÁC)
