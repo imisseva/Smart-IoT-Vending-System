@@ -18,9 +18,11 @@ app.use(express.json());
 
 import orderRoutes from './routes/Order.routes.js';
 import machineRoutes from './routes/Machine.routes.js';
+import adminRoutes from './routes/Admin.routes.js';
 
 app.use('/api/orders', orderRoutes);
 app.use('/api/machine', machineRoutes);
+app.use('/api/admin', adminRoutes);
 
 const PORT = process.env.PORT || 5000;
 

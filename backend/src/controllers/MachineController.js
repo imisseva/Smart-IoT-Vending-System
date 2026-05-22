@@ -50,3 +50,33 @@ export const dropCup = async (req, res) => {
     }
 };
 
+export const refillWater = async (req, res) => {
+    try {
+        const { id, water_level } = req.body;
+        const result = await MachineService.refillWater(id, water_level);
+        res.status(200).json(result);
+    } catch (error) {
+        console.error('[MachineController - refillWater Error] Lỗi:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+};
+
+export const getMachineStatus = async (req, res) => {
+    try {
+        const statuses = await MachineService.getAllMachineStatus();
+        res.status(200).json({ success: true, data: statuses });
+    } catch (error) {
+        console.error('[MachineController - getMachineStatus Error] Lỗi:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+};
+
+export const getAnalytics = async (req, res) => {
+    try {
+        const analytics = await MachineService.getAnalytics();
+        res.status(200).json({ success: true, data: analytics });
+    } catch (error) {
+        console.error('[MachineController - getAnalytics Error] Lỗi:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+};
