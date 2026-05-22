@@ -80,6 +80,9 @@ export default function OrderWizard() {
           setHasDroppedCup(true);
         } else if (dbOrder.status === 'Waiting') {
           setStep(4);
+        } else if (dbOrder.status === 'Failed') {
+          handleResetSession();
+          showError("Đơn hàng đã bị hủy hoặc gặp sự cố! Vui lòng thực hiện lại từ đầu.");
         }
       }
     } catch (err) {

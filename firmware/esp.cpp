@@ -72,6 +72,7 @@ unsigned long pourStartTime = 0;
 int consecutiveTargetCount = 0;
 int consecutiveDangerCount = 0;
 int consecutiveOutliers = 0;
+int consecutiveCupRemovedCount = 0; // Đếm số lần liên tiếp phát hiện mất cốc trong lúc rót
 
 // Trạng thái nhả ly phi tuần tự (Non-blocking)
 bool isDropCupActive = false;
@@ -288,6 +289,7 @@ void xuLyLenh(String command) {
     consecutiveTargetCount = 0;
     consecutiveDangerCount = 0;
     consecutiveOutliers = 0;
+    consecutiveCupRemovedCount = 0; // Reset bộ đếm khi bắt đầu rót
   } 
   
   // B. LỆNH NHẢ LY (DROP_CUP)
@@ -417,6 +419,25 @@ void loop() {
 
       if (isSensorReady) {
         float dist = getRawDistance();
+        
+        // KIỂM TRA RÚT LY KHẨN CẤP (Nếu khoảng cách đo được gần bằng khay trống hoặc quá lớn)
+        if (dist >= 23.0 && dist <= MAX_PHYSICAL_DISTANCE) {
+          consecutiveCupRemovedCount++;
+          Serial.printf("[Sens-Rot] Canh bao nghi ngo rut ly lan thu: %d (Khoang cach: %.1f cm)\n", 
+                        consecutiveCupRemovedCount, dist);
+          if (consecutiveCupRemovedCount >= 4) { // ~600ms liên tiếp
+            tatBom("Phat hien ly bi rut khoi khay (Khoang cach lon)");
+            delay(150); // Tránh giật điện nguồn
+            guiBaoCaoRotWebSocket(dist, 0.0, "CUP_REMOVED");
+            return;
+          }
+        } else {
+          // Chỉ reset bộ đếm rút ly khi đo được khoảng cách ly hợp lệ (< 22.0 cm)
+          if (dist > 2.0 && dist < 22.0) {
+            consecutiveCupRemovedCount = 0;
+          }
+        }
+
         if (dist > 0.0) {
           // Giới hạn vật lý
           if (dist > 2.0 && dist <= emptyDistance + 2.0 && dist <= MAX_PHYSICAL_DISTANCE) {
@@ -535,9 +556,9 @@ void loop() {
 
     // Gửi trạng thái cảm biến lên server qua WebSocket (Thay thế hoàn toàn cho HTTP POST cũ)
     if (WiFi.status() == WL_CONNECTED) {
-      if (distance != -1) {
-        guiBaoCaoRotWebSocket(distance, 0.0, "");
-      }
+      // Nếu distance == -1 (đo lỗi hoặc ngoài tầm), gửi emptyDistance để báo không có cốc!
+      float reportDistance = (distance != -1) ? distance : emptyDistance;
+      guiBaoCaoRotWebSocket(reportDistance, 0.0, "");
       wifiDropTime = 0;
     } else {
       if (wifiDropTime == 0) wifiDropTime = millis();

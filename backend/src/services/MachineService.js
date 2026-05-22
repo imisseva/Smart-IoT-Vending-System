@@ -201,8 +201,20 @@ export const updateSensor = async (waterLevel, isCupPlaced, dispensingProgress, 
     console.log(`[Sensor ESP8266] Đo khoảng cách cốc ToF: ${waterLevel} cm | Đã đặt ly: ${isCupPlaced} | Tiến trình: ${dispensingProgress}% | Trạng thái: ${pourStatus}`);
 
     // Lưu giữ thông tin đơn hàng đang hoạt động trước khi bị xóa bởi hàm completeOrder
-    const activeOrderId = currentServingOrderId;
-    const activeQueueNumber = currentServingQueueNumber;
+    let activeOrderId = currentServingOrderId;
+    let activeQueueNumber = currentServingQueueNumber;
+
+    if (!activeOrderId) {
+        try {
+            const activeOrders = await OrderModel.findActiveOrders();
+            if (activeOrders.length > 0) {
+                activeOrderId = activeOrders[0].id;
+                activeQueueNumber = activeOrders[0].queue_number;
+            }
+        } catch (err) {
+            console.error('[Machine Service] Lỗi khi tự động giải quyết activeOrderId cho sensor_update:', err);
+        }
+    }
 
     // An toàn: Nếu nước quá đầy (khoảng cách < 5cm) → tắt bơm khẩn cấp
     if (waterLevel < 5 && currentCommand !== 'STOP') {
