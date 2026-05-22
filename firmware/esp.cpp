@@ -80,7 +80,7 @@ const int triggerPepsi = 4; // GPIO4 (D2) → Chân 6 Uno
 // Cấu hình mạng & Server
 const char* ssid = "11 Thanh Vinh 5 Tang 2";
 const char* password = "11thanhvinh5";
-const char* serverIP = "192.168.1.60"; 
+const char* serverIP = "192.168.1.119"; 
 const uint16_t serverPort = 5000;  
 
 unsigned long lastSensorIdleReport = 0;

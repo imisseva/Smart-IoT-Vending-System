@@ -66,7 +66,7 @@ void setup() {
   pinMode(in1, INPUT_PULLUP); 
   pinMode(in2, INPUT_PULLUP);
   
-  digitalWrite(out1, LOW); 
+  digitalWrite(out1, LOW); // Mức LOW để TẮT bơm lúc khởi động (Active HIGH)
   digitalWrite(out2, LOW); 
   pinMode(out1, OUTPUT); 
   pinMode(out2, OUTPUT);
@@ -145,7 +145,7 @@ void loop() {
       if (millis() - lastCupDropTime >= CUP_DROP_COOLDOWN) {
         lastCupDropTime = millis();
         
-        digitalWrite(out1, LOW);
+        digitalWrite(out1, LOW); // Giữ tắt bơm trong lúc nhả ly
         digitalWrite(out2, LOW);
         
         Serial.println("[V7] >>> LENH NHA LY <<<");
@@ -173,8 +173,8 @@ void loop() {
   // BƠM COCA: Chỉ chân 1 active, chân 2 không active
   else if (pin1Active && !pin2Active) {
     cupDropDone = false;
-    digitalWrite(out1, HIGH);
-    digitalWrite(out2, LOW);
+    digitalWrite(out1, HIGH); // Kích HIGH = BẬT bơm Coca (Active HIGH)
+    digitalWrite(out2, LOW);  // Kích LOW = TẮT bơm Pepsi
     
     if (!pumpTimerActive) {
       pumpTimerActive = true;
@@ -190,8 +190,8 @@ void loop() {
   // BƠM PEPSI: Chỉ chân 2 active, chân 1 không active
   else if (!pin1Active && pin2Active) {
     cupDropDone = false;
-    digitalWrite(out1, LOW);
-    digitalWrite(out2, HIGH);
+    digitalWrite(out1, LOW);  // Kích LOW = TẮT bơm Coca
+    digitalWrite(out2, HIGH); // Kích HIGH = BẬT bơm Pepsi (Active HIGH)
     
     if (!pumpTimerActive) {
       pumpTimerActive = true;
@@ -207,8 +207,8 @@ void loop() {
   // KHÔNG CÓ GÌ ACTIVE: Tắt hết
   else if (!pin1Active && !pin2Active) {
     cupDropDone = false;
-    digitalWrite(out1, LOW);
-    digitalWrite(out2, LOW);
+    digitalWrite(out1, LOW); // Kích LOW = TẮT bơm Coca
+    digitalWrite(out2, LOW); // Kích LOW = TẮT bơm Pepsi
     
     if (pumpTimerActive) {
       pumpTimerActive = false;
@@ -223,7 +223,7 @@ void loop() {
   
   // WATCHDOG: Tắt bơm nếu chạy quá 20 giây
   if (pumpTimerActive && (millis() - pumpStartTime > MAX_PUMP_TIME)) {
-    digitalWrite(out1, LOW);
+    digitalWrite(out1, LOW); // Ngắt khẩn cấp bằng mức LOW
     digitalWrite(out2, LOW);
     pumpTimerActive = false;
     pin1Active = false;

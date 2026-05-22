@@ -7,18 +7,18 @@ async function resetSystem() {
     
     // 1. Tìm các đơn hàng đang Serving hoặc Waiting
     const activeOrders = await pool.query(
-      `SELECT id, queue_number, username, status FROM Orders WHERE status IN ('Serving', 'Waiting')`
+      `SELECT id, queue_number, status FROM orders WHERE status IN ('Serving', 'Waiting')`
     );
     
     console.log(`Tìm thấy ${activeOrders.rows.length} đơn hàng đang hoạt động/chờ.`);
     
     if (activeOrders.rows.length > 0) {
       for (const order of activeOrders.rows) {
-        console.log(`Đang xử lý hoàn tất đơn hàng ID: ${order.id} (Số thứ tự: ${order.queue_number}, Người dùng: ${order.username})`);
+        console.log(`Đang xử lý hoàn tất đơn hàng ID: ${order.id} (Số thứ tự: ${order.queue_number})`);
         
         // Cập nhật trạng thái đơn hàng thành Done
         await pool.query(
-          `UPDATE Orders SET status = 'Done' WHERE id = $1`,
+          `UPDATE orders SET status = 'Done' WHERE id = $1`,
           [order.id]
         );
       }

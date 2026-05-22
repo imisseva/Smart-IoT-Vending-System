@@ -29,6 +29,7 @@ export default function OrderWizard() {
   const [pourProgress, setPourProgress] = useState(0);
   const [isPouring, setIsPouring] = useState(false);
   const [isDone, setIsDone] = useState(false);
+  const [currentWaterLevel, setCurrentWaterLevel] = useState(0);
 
   const [hasDroppedCup, setHasDroppedCup] = useState(false);
   const [isDroppingCup, setIsDroppingCup] = useState(false);
@@ -148,6 +149,9 @@ export default function OrderWizard() {
         if (order.id && Number(data.order_id) === Number(order.id)) {
           if (typeof data.is_cup_placed !== 'undefined') {
             setIsCupPlacedRealtime(data.is_cup_placed);
+          }
+          if (typeof data.water_level !== 'undefined') {
+            setCurrentWaterLevel(data.water_level);
           }
           if (typeof data.dispensing_progress !== 'undefined') {
             const prog = parseInt(data.dispensing_progress);
@@ -293,7 +297,17 @@ export default function OrderWizard() {
   }, [hasDroppedCup]);
 
   // Đặt lại phiên mua hàng
-  const handleResetSession = () => {
+  const handleResetSession = async () => {
+    // Nếu có đơn hàng đang bị kẹt và chưa hoàn tất, chủ động gửi lệnh giải phóng máy về Backend
+    if (order.id && !isDone) {
+      try {
+        await machineService.completeOrder(order.id);
+        console.log("Đã chủ động gửi lệnh giải phóng máy bán nước khỏi đơn hàng cũ.");
+      } catch (err) {
+        console.error("Lỗi khi gửi lệnh giải phóng máy bán nước:", err);
+      }
+    }
+
     if (typeof window !== 'undefined') {
       localStorage.removeItem('current_order');
       localStorage.removeItem('order_step');
@@ -302,6 +316,7 @@ export default function OrderWizard() {
     setStep(1);
     setOrder({ drink: "", size: "", ml: "", price: "", priceNum: 0, name: "", id: null, queue_number: "", payment_status: "Unpaid" });
     setPourProgress(0);
+    setCurrentWaterLevel(0);
     setIsDone(false);
     setHasDroppedCup(false);
     setIsCupPlacedRealtime(false);
@@ -689,7 +704,11 @@ export default function OrderWizard() {
 
             <div className="w-full px-2">
               <div className="flex justify-between text-xs font-extrabold text-[#185FA5] mb-2.5">
-                <span>{pourProgress > 0 ? "Đang rót nước..." : "Đang gửi lệnh tới máy..."}</span>
+                <span>
+                  {pourProgress > 0 || isPouring
+                    ? `Đang rót nước... ${currentWaterLevel > 0 ? `(Cảm biến: ${Number(currentWaterLevel).toFixed(1)} cm)` : ""}` 
+                    : `Đang gửi lệnh tới máy... ${currentWaterLevel > 0 ? `(Cảm biến: ${Number(currentWaterLevel).toFixed(1)} cm)` : ""}`}
+                </span>
                 <span>{pourProgress}%</span>
               </div>
               <div className="w-full h-3.5 bg-slate-100 rounded-full overflow-hidden shadow-inner border border-slate-200/80">
@@ -719,6 +738,12 @@ export default function OrderWizard() {
                 <span>Dung tích thực tế:</span>
                 <span className="font-bold text-slate-800">{order.ml}</span>
               </div>
+              {currentWaterLevel > 0 && (
+                <div className="flex justify-between py-1 border-b border-emerald-100/50">
+                  <span>Khoảng cách cảm biến:</span>
+                  <span className="font-bold text-slate-800">{Number(currentWaterLevel).toFixed(1)} cm</span>
+                </div>
+              )}
               <div className="flex justify-between py-1">
                 <span>Trạng thái:</span>
                 <span className="font-bold text-emerald-600">Thành công</span>

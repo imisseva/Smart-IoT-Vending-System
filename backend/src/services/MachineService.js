@@ -220,6 +220,7 @@ export const updateSensor = async (waterLevel, isCupPlaced, dispensingProgress, 
         statuses: statuses, 
         is_cup_placed: isCupPlaced,
         dispensing_progress: dispensingProgress !== undefined ? parseInt(dispensingProgress) : undefined,
+        water_level: waterLevel,
         order_id: activeOrderId,
         queue_number: activeQueueNumber
     });
