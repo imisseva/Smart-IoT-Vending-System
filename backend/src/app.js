@@ -16,6 +16,10 @@ initSocket(httpServer);
 app.use(cors());
 app.use(express.json());
 
+app.get('/', (req, res) => {
+    res.status(200).json({ status: 'healthy', message: 'Smart IoT Vending System Backend is Live!' });
+});
+
 import orderRoutes from './routes/Order.routes.js';
 import machineRoutes from './routes/Machine.routes.js';
 import adminRoutes from './routes/Admin.routes.js';

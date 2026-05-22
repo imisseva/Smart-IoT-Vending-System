@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { API_URL } from '../constants/config';
+import { API_URL, RUN_ON_RENDER } from '../constants/config';
 import { io } from 'socket.io-client';
 
 export const apiClient = axios.create({
@@ -14,18 +14,27 @@ export const apiClient = axios.create({
 let socketInstance = null;
 
 if (typeof window !== 'undefined') {
-  const hostname = window.location.hostname;
-  
-  // Ghi đè BaseURL động cho Axios trên trình duyệt của thiết bị
-  apiClient.defaults.baseURL = `http://${hostname}:5000/api`;
-  
-  // Khởi tạo kết nối Socket.IO động tới đúng IP LAN của server máy tính
-  const socketUrl = `http://${hostname}:5000`;
-  console.log(`[API & Socket] Đang thiết lập kết nối động tới: ${socketUrl}`);
-  
-  socketInstance = io(socketUrl, {
-    transports: ['websocket', 'polling']
-  });
+  if (RUN_ON_RENDER) {
+    // Nếu chạy trên Render Cloud, lấy trực tiếp địa chỉ API_URL từ config
+    const SOCKET_URL = API_URL.replace('/api', '');
+    console.log(`[API & Socket] Chạy Cloud Render: Kết nối tới URL cố định: ${SOCKET_URL}`);
+    socketInstance = io(SOCKET_URL, {
+      transports: ['websocket', 'polling']
+    });
+  } else {
+    const hostname = window.location.hostname;
+    
+    // Ghi đè BaseURL động cho Axios trên trình duyệt của thiết bị
+    apiClient.defaults.baseURL = `http://${hostname}:5000/api`;
+    
+    // Khởi tạo kết nối Socket.IO động tới đúng IP LAN của server máy tính
+    const socketUrl = `http://${hostname}:5000`;
+    console.log(`[API & Socket] Chạy Local LAN: Đang thiết lập kết nối động tới: ${socketUrl}`);
+    
+    socketInstance = io(socketUrl, {
+      transports: ['websocket', 'polling']
+    });
+  }
 } else {
   // Fallback khi chạy phía Server (SSR)
   const SOCKET_URL = API_URL.replace('/api', '');

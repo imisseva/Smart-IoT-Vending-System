@@ -77,11 +77,22 @@ int consecutiveOutliers = 0;
 const int triggerCoca = 5;  // GPIO5 (D1) → Chân 7 Uno
 const int triggerPepsi = 4; // GPIO4 (D2) → Chân 6 Uno
 
+// ============================================================
+// CHẾ ĐỘ HOẠT ĐỘNG: ĐẶT 1 ĐỂ CHẠY CLOUD (RENDER), ĐẶT 0 ĐỂ CHẠY LOCAL (LAN)
+// ============================================================
+#define USE_CLOUD 1 
+
 // Cấu hình mạng & Server
 const char* ssid = "11 Thanh Vinh 5 Tang 2";
 const char* password = "11thanhvinh5";
+
+#if USE_CLOUD
+const char* serverHost = "water-pouring.onrender.com";
+const uint16_t serverPort = 443;
+#else
 const char* serverIP = "192.168.1.119"; 
 const uint16_t serverPort = 5000;  
+#endif
 
 unsigned long lastSensorIdleReport = 0;
 unsigned long wifiDropTime = 0;
@@ -342,8 +353,13 @@ void setup() {
 
   // Cấu hình WebSocket Client kết nối Socket.IO Server của Node.js
   // Endpoint WebSocket Socket.IO v4 mặc định: /socket.io/?EIO=4&transport=websocket
-  Serial.printf("Dang khoi dong WebSocket ket noi toi %s:%d...\n", serverIP, serverPort);
+#if USE_CLOUD
+  Serial.printf("Dang khoi dong WebSocket (SSL) ket noi toi Cloud: %s...\n", serverHost);
+  webSocket.beginSSL(serverHost, serverPort, "/socket.io/?EIO=4&transport=websocket");
+#else
+  Serial.printf("Dang khoi dong WebSocket ket noi toi Local: %s:%d...\n", serverIP, serverPort);
   webSocket.begin(serverIP, serverPort, "/socket.io/?EIO=4&transport=websocket");
+#endif
   webSocket.onEvent(webSocketEvent);
   webSocket.setReconnectInterval(5000); // Thử lại sau 5s nếu rớt kết nối
 }
