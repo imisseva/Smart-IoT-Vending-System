@@ -39,7 +39,7 @@ export default function OrderWizard() {
   const [cocaLevel, setCocaLevel] = useState(5000);
   const [pepsiLevel, setPepsiLevel] = useState(5000);
   const [countdown, setCountdown] = useState(10);
-  const [cupCountdown, setCupCountdown] = useState(15);
+  const [cupCountdown, setCupCountdown] = useState(25);
 
   // Hiển thị lỗi tạm thời (3 giây)
   const showError = (msg) => {
@@ -259,15 +259,15 @@ export default function OrderWizard() {
           if (prev <= 1) {
             clearInterval(timerId);
             handleResetSession();
-            showError("Quá thời gian 15 giây đặt ly! Hệ thống tự động hủy phiên để đảm bảo an toàn.");
-            return 15;
+            showError("Quá thời gian 25 giây đặt ly! Hệ thống tự động hủy phiên để đảm bảo an toàn.");
+            return 25;
           }
           return prev - 1;
         });
       }, 1000);
     } else {
-      // Nếu có ly đặt vào hoặc trạng thái khác, đặt lại đếm ngược về 15
-      setCupCountdown(15);
+      // Nếu có ly đặt vào hoặc trạng thái khác, đặt lại đếm ngược về 25
+      setCupCountdown(25);
     }
 
     return () => {
@@ -395,7 +395,7 @@ export default function OrderWizard() {
     setHasDroppedCup(false);
     setIsCupPlacedRealtime(false);
     setCountdown(10);
-    setCupCountdown(15);
+    setCupCountdown(25);
   };
 
   // GIAO DIỆN STEP 1: CHỌN NƯỚC UỐNG
@@ -605,7 +605,7 @@ export default function OrderWizard() {
       try {
         await machineService.dropCup(order.id);
         setHasDroppedCup(true);
-        setCupCountdown(15); // Khởi tạo đếm ngược 15 giây để người dùng đặt ly
+        setCupCountdown(25); // Khởi tạo đếm ngược 25 giây để người dùng đặt ly
       } catch (err) {
         showError('Không thể nhả ly nước. Vui lòng thử lại!');
       } finally {

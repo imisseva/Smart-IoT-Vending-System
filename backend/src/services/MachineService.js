@@ -7,6 +7,7 @@ let currentCommand = "STOP";
 let currentServingOrderId = null;
 let currentServingQueueNumber = null;
 let safetyTimeoutTimer = null;
+let hasCurrentOrderDroppedCup = false; // Theo dõi xem đơn hàng hiện tại đã nhấn nút nhả ly chưa
 
 // Khôi phục trạng thái đang rót từ DB khi khởi động lại server
 const initServingState = async () => {
@@ -43,12 +44,16 @@ const runWatchdog = async () => {
                     // Cập nhật đơn hàng mới đứng đầu hàng chờ
                     currentFrontOrderId = firstOrder.id;
                     frontOrderStartTime = Date.now();
-                    console.log(`[Watchdog] Đơn hàng ID ${firstOrder.id} (SĐT: ${firstOrder.queue_number}) đã lên đầu hàng chờ. Bắt đầu đếm ngược 10 giây...`);
+                    hasCurrentOrderDroppedCup = false; // Reset cờ nhả cốc cho đơn hàng mới
+                    console.log(`[Watchdog] Đơn hàng ID ${firstOrder.id} (SĐT: ${firstOrder.queue_number}) đã lên đầu hàng chờ. Bắt đầu giám sát...`);
                 } else {
                     // Đơn hàng cũ vẫn đứng đầu, kiểm tra thời gian trôi qua
                     const elapsed = Date.now() - frontOrderStartTime;
-                    if (elapsed > 10000) { // 10 giây
-                        console.warn(`[Watchdog Timeout] Đơn hàng ID ${firstOrder.id} (SĐT: ${firstOrder.queue_number}) đã chờ thao tác quá 10 giây. Tự động hoàn tất/hủy để giải phóng hàng chờ...`);
+                    // Gia hạn: Nếu đã nhấn nhả cốc, cho phép chờ tối đa 30 giây để người dùng đặt cốc. Nếu chưa nhả cốc, cho phép chờ 15 giây.
+                    const timeoutLimit = hasCurrentOrderDroppedCup ? 30000 : 15000;
+                    
+                    if (elapsed > timeoutLimit) {
+                        console.warn(`[Watchdog Timeout] Đơn hàng ID ${firstOrder.id} (SĐT: ${firstOrder.queue_number}) đã quá thời gian ${timeoutLimit / 1000}s chờ thao tác. Tự động hủy đơn hàng...`);
                         await completeOrder(firstOrder.id, 'Failed');
                     }
                 }
@@ -125,6 +130,9 @@ export const completeOrder = async (orderId, targetStatus = 'Done') => {
     getIo().emit('machine_command', "STOP");
     currentServingOrderId = null;
     currentServingQueueNumber = null;
+    hasCurrentOrderDroppedCup = false; // Reset cờ nhả cốc khi hoàn tất hoặc hủy đơn
+    currentFrontOrderId = null;
+    frontOrderStartTime = null;
 
     // Tự động trừ đi mực nước trong bình chứa ảo tùy theo kích cỡ cốc đã chọn (Chỉ trừ khi rót thành công 'Done')
     try {
@@ -181,11 +189,11 @@ export const dropCup = async (orderId) => {
     getIo().emit('machine_command', "DROP_CUP");
     console.log(`[Drop Cup] Đã phát lệnh nhả ly cho Order ID: ${orderId} qua WebSocket`);
 
-    // GIA HẠN WATCHDOG: Khi nhả ly thành công, cập nhật frontOrderStartTime để gia hạn 10 giây trên Backend!
-    if (currentFrontOrderId === orderId) {
-        frontOrderStartTime = Date.now();
-        console.log(`[Watchdog] Gia hạn thêm 10 giây cho Order ID: ${orderId} do đã nhấn nhả ly.`);
-    }
+    // GIA HẠN WATCHDOG: Đánh dấu đã nhả ly và gia hạn thời gian chờ trên Backend lên 30 giây!
+    currentFrontOrderId = orderId; // Đảm bảo đồng bộ ngay lập tức để tránh race condition với runWatchdog
+    hasCurrentOrderDroppedCup = true; // Đánh dấu đã nhả cốc
+    frontOrderStartTime = Date.now(); // Reset bộ đếm thời gian bắt đầu chờ
+    console.log(`[Watchdog] Gia hạn thời gian chờ đặt ly lên 30 giây cho Order ID: ${orderId}.`);
 
     return { command: currentCommand };
 };
