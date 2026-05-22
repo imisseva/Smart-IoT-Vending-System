@@ -88,18 +88,18 @@ export const dispenseDrink = async (orderId) => {
     currentServingOrderId = orderId;
     currentServingQueueNumber = queue_number;
 
-    // Thiết lập bộ đếm thời gian an toàn 10 giây (Safety Fail-safe Timeout cho demo nhanh)
+    // Thiết lập bộ đếm thời gian an toàn 25 giây (Safety Fail-safe Timeout cho phần cứng bơm đủ nước)
     if (safetyTimeoutTimer) {
         clearTimeout(safetyTimeoutTimer);
     }
     safetyTimeoutTimer = setTimeout(async () => {
-        console.warn(`[SAFETY TIMEOUT] Đơn hàng ID ${orderId} đang rót vượt quá 10 giây mà chưa nhận được tín hiệu hoàn tất. Tiến hành tự động khôi phục an toàn...`);
+        console.warn(`[SAFETY TIMEOUT] Đơn hàng ID ${orderId} đang rót vượt quá 25 giây mà chưa nhận được tín hiệu hoàn tất. Tiến hành tự động khôi phục an toàn...`);
         try {
             await completeOrder(orderId, 'Failed');
         } catch (err) {
             console.error('[SAFETY TIMEOUT ERROR] Không thể tự động khôi phục đơn hàng:', err);
         }
-    }, 10000);
+    }, 25000);
 
     // 3. Báo frontend
     getIo().emit('queue_updated');
