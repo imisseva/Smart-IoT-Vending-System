@@ -6,12 +6,12 @@
 // - ESP giữ chân LOW = bơm chạy, ESP giữ chân HIGH = bơm tắt
 // - Arduino có cơ chế "dính trạng thái" (Hysteresis):
 //   + BẬT BƠM: Chỉ cần đọc LOW 3 lần liên tiếp (~15ms) → BẬT ngay
-//   + TẮT BƠM: Phải đọc HIGH ít nhất 40 lần liên tiếp (~200ms) → mới TẮT
+//   + TẮT BƠM: Phải đọc HIGH ít nhất 15 lần liên tiếp (~75ms) → mới TẮT
 //   + Điều này đảm bảo bơm chạy mượt, không bị giật do nhiễu ngắn hạn
 //
 // KẾT NỐI DÂY:
-// - Chân 7 (in1) ← D1 ESP (Coca)   - Chân 4 (out1) → IN1 Relay
-// - Chân 6 (in2) ← D2 ESP (Pepsi)  - Chân 5 (out2) → IN2 Relay
+// - Chân 10 (in1) ← D1 ESP (Coca)   - Chân 3 (out1) → IN1 Relay
+// - Chân 6 (in2) ← D2 ESP (Pepsi)   - Chân 5 (out2) → IN2 Relay
 // - Chân 9 → Servo                  - GND chung ESP + Uno
 
 #include <Wire.h> 
