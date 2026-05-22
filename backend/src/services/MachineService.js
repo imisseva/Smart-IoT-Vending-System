@@ -63,6 +63,9 @@ export const dispenseDrink = async (orderId) => {
     // 4. Chuẩn bị lệnh cho ESP8266 kèm theo Size (Ví dụ: POUR_COCA_M)
     currentCommand = drink_name === 'Coca-Cola' ? `POUR_COCA_${size}` : `POUR_PEPSI_${size}`;
 
+    // Phát lệnh tức thì qua WebSocket tới ESP8266
+    getIo().emit('machine_command', currentCommand);
+
     return { command: currentCommand };
 };
 
@@ -75,6 +78,7 @@ export const completeOrder = async (orderId) => {
     }
 
     currentCommand = "STOP";
+    getIo().emit('machine_command', "STOP");
     currentServingOrderId = null;
     currentServingQueueNumber = null;
 
@@ -97,7 +101,8 @@ export const dropCup = async (orderId) => {
 
     // Thiết lập lệnh DROP_CUP cho ESP8266
     currentCommand = "DROP_CUP";
-    console.log(`[Drop Cup] Đã tạo lệnh nhả ly cho Order ID: ${orderId}`);
+    getIo().emit('machine_command', "DROP_CUP");
+    console.log(`[Drop Cup] Đã phát lệnh nhả ly cho Order ID: ${orderId} qua WebSocket`);
     return { command: currentCommand };
 };
 
@@ -117,7 +122,8 @@ export const updateSensor = async (waterLevel, isCupPlaced, dispensingProgress, 
     // An toàn: Nếu nước quá đầy (khoảng cách < 5cm) → tắt bơm khẩn cấp
     if (waterLevel < 5 && currentCommand !== 'STOP') {
         currentCommand = 'STOP';
-        console.log(`[CẢNH BÁO KHẨN CẤP] Nước sắp tràn! Đã ngắt lệnh bơm.`);
+        getIo().emit('machine_command', 'STOP');
+        console.log(`[CẢNH BÁO KHẨN CẤP] Nước sắp tràn! Đã phát lệnh ngắt bơm khẩn cấp.`);
     }
 
     // ESP8266 xác nhận đã nhận lệnh (Acknowledge) hoặc đang rót nước -> tự động reset lệnh về STOP

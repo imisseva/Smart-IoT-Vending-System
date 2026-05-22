@@ -24,7 +24,7 @@ Servo cupServo;
 const int servoPin = 9;
 const int in1 = 7;  // Coca trigger từ ESP
 const int in2 = 6;  // Pepsi trigger từ ESP
-const int out1 = 4; // Relay Coca
+const int out1 = 3; // Relay Coca (Chuyển sang chân Pin 3 lành lặn vì Pin 4 đã bị cháy)
 const int out2 = 5; // Relay Pepsi
 
 const int SERVO_LOCK_ANGLE = 0;

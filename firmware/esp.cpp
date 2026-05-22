@@ -1,12 +1,13 @@
 // FILE: esp.cpp
 // Chạy trên ESP8266
-// PHIÊN BẢN V8.6: Continuous Level Control (Dùng cảm biến laser VL53L0X + Lọc DSP)
+// PHIÊN BẢN V9.0: Giao tiếp 100% qua WebSockets (Socket.IO v4 Protocol)
+// Kế thừa: Thuật toán đo khoảng cách laser VL53L0X + Bộ lọc DSP EMA + Khôi phục Latching
 //
-// NGUYÊN TẮC HOẠT ĐỘNG CỰC KỲ ĐƠN GIẢN:
-// - Khi cần bơm: ESP GIỮ chân tương ứng ở mức LOW suốt thời gian rót nước
-// - Khi cần tắt: ESP ĐƯA chân về HIGH
-// - Arduino Uno chỉ đọc mức và lái relay tương ứng, không có logic phức tạp
-// - Khi cần nhả ly: ESP kéo CẢ HAI chân LOW trong 2 giây rồi trả về HIGH
+// NGUYÊN TẮC HOẠT ĐỘNG:
+// - Kết nối WebSocket hai chiều thời gian thực đến Backend (Express + Socket.IO) cổng 5000.
+// - Lắng nghe lệnh trực tiếp qua sự kiện "machine_command" (POUR_COCA_M, POUR_PEPSI_S, DROP_CUP, STOP).
+// - Phát trạng thái cảm biến liên tục qua sự kiện "machine_sensor" (Không còn dùng HTTP Polling).
+// - Duy trì kết nối bằng cơ chế bắt tay Engine.IO v4 và Ping-Pong Heartbeat tự động.
 //
 // KẾT NỐI DÂY:
 // - D1 (GPIO5) → Nối vào chân 7 Arduino Uno (Lệnh Coca)
@@ -17,8 +18,7 @@
 //
 
 #include <ESP8266WiFi.h>
-#include <ESP8266HTTPClient.h>
-#include <WiFiClient.h>
+#include <WebSocketsClient.h> // Thư viện Markus Sattler (cực kỳ nhẹ, hoạt động ở tầng TCP Socket thô)
 #include <Wire.h>
 #include <Adafruit_VL53L0X.h>
 
@@ -27,6 +27,7 @@
 #define SCL_PIN 12  // GPIO12 (Tương đương chân D6 trên NodeMCU)
 
 Adafruit_VL53L0X sensor = Adafruit_VL53L0X();
+WebSocketsClient webSocket;
 
 float emptyDistance = 26.0;
 const float CUP_THRESHOLD = 0.8;
@@ -39,7 +40,6 @@ float getRawDistance() {
   VL53L0X_RangingMeasurementData_t measure;
   sensor.rangingTest(&measure, false);
   
-  // Chỉ lấy dữ liệu đo khi trạng thái hoàn hảo (RangeStatus == 0)
   if (measure.RangeStatus == 0) {
     float dist = (float)measure.RangeMilliMeter / 10.0; // Đổi sang cm
     return dist;
@@ -73,125 +73,263 @@ int consecutiveTargetCount = 0;
 int consecutiveDangerCount = 0;
 int consecutiveOutliers = 0;
 
-// Điều khiển Arduino Uno (Dùng số hiệu GPIO trực tiếp để chống sai lệch Board Profile)
-const int triggerCoca = 5;  // GPIO5 (Tương đương chân D1 trên NodeMCU) → Chân 7 Uno
-const int triggerPepsi = 4; // GPIO4 (Tương đương chân D2 trên NodeMCU) → Chân 6 Uno
+// Điều khiển Arduino Uno
+const int triggerCoca = 5;  // GPIO5 (D1) → Chân 7 Uno
+const int triggerPepsi = 4; // GPIO4 (D2) → Chân 6 Uno
 
-// Cấu hình mạng
+// Cấu hình mạng & Server
 const char* ssid = "11 Thanh Vinh 5 Tang 2";
 const char* password = "11thanhvinh5";
 const char* serverIP = "192.168.1.60"; 
 const uint16_t serverPort = 5000;  
 
-unsigned long lastPolling = 0;
+unsigned long lastSensorIdleReport = 0;
 unsigned long wifiDropTime = 0;
-const int POLLING_INTERVAL = 1000;
+const int IDLE_REPORT_INTERVAL = 1000; // Gửi báo cáo định kỳ khi rỗi mỗi 1 giây
 
-// Hàm gửi báo cáo tiến trình rót nước lên backend
-void guiBaoCaoRot(float dCurrent, float progress, String pourStatus) {
-  if (WiFi.status() == WL_CONNECTED) {
-    WiFiClient client;
-    HTTPClient http;
-    String statusUrl = "http://" + String(serverIP) + ":" + String(serverPort) + "/api/machine/status";
-    
-    String jsonPayload = "{\"water_level\": " + String(dCurrent, 1) + 
-                         ", \"is_cup_placed\": true" + 
-                         ", \"dispensing_progress\": " + String(progress, 0);
-    
-    if (pourStatus != "") {
-      jsonPayload += ", \"pour_status\": \"" + pourStatus + "\"";
-    }
-    jsonPayload += "}";
+void xuLyLenh(String command);
 
-    int retries = (pourStatus == "DONE") ? 3 : 1;
-    
-    for (int i = 0; i < retries; i++) {
-      http.begin(client, statusUrl);
-      http.addHeader("Content-Type", "application/json");
-      int httpCode = http.POST(jsonPayload);
-      
-      Serial.print("[HTTP Status] Gui bao cao (Lan ");
-      Serial.print(i + 1);
-      Serial.print("/");
-      Serial.print(retries);
-      Serial.print("): ");
-      Serial.print(jsonPayload);
-      Serial.print(" -> Response Code: ");
-      Serial.println(httpCode);
-      
-      if (httpCode > 0 && httpCode < 400) {
-        http.end();
-        break;
-      } else {
-        Serial.print("[HTTP Status] Loi: ");
-        Serial.println(httpCode <= 0 ? http.errorToString(httpCode).c_str() : String(httpCode));
-      }
-      http.end();
-      if (i < retries - 1) {
-        delay(300); // Đợi 300ms trước khi thử lại
-      }
-    }
-  } else {
-    Serial.println("[HTTP Status] Loi: Mat ket noi WiFi, khong the gui bao cao!");
+// ============================================================
+// Gửi dữ liệu cảm biến thời gian thực lên Server qua WebSocket
+// Định dạng: 42["machine_sensor", { ...json... }]
+// ============================================================
+void guiBaoCaoRotWebSocket(float dCurrent, float progress, String pourStatus) {
+  // Xác định xem cốc có đang được đặt hay không
+  bool isCupPlaced = (dCurrent <= 25.0 && dCurrent > 0);
+  String cupPlacedStr = isCupPlaced ? "true" : "false";
+
+  String statusPart = "";
+  if (pourStatus != "") {
+    statusPart = ", \"pour_status\": \"" + pourStatus + "\"";
   }
+
+  // Đóng gói chuỗi sự kiện Socket.IO v4
+  String payload = "42[\"machine_sensor\",{\"water_level\": " + String(dCurrent, 1) + 
+                   ", \"is_cup_placed\": " + cupPlacedStr + 
+                   ", \"dispensing_progress\": " + String(progress, 0) + 
+                   statusPart + "}]";
+
+  Serial.print("[WebSocket Send] ");
+  Serial.println(payload);
+
+  webSocket.sendTXT(payload);
 }
 
 // ============================================================
-// Hàm BẬT BƠM: Chuyển chân sang OUTPUT và kéo LOW (Cơ chế Open-Drain)
+// Hàm BẬT BƠM (Open-Drain)
 // ============================================================
 void batBom(int pumpPin) {
   currentActivePump = pumpPin;
   pinMode(currentActivePump, OUTPUT);
-  digitalWrite(currentActivePump, LOW); // LOW = Active → Arduino bật relay
-  Serial.print("[V8-OpenDrain] BAT BOM: Keo chan ");
+  digitalWrite(currentActivePump, LOW); // LOW = Active
+  Serial.print("[V9-OpenDrain] BAT BOM: Keo chan ");
   Serial.print(pumpPin == triggerCoca ? "GPIO5 (Coca)" : "GPIO4 (Pepsi)");
-  Serial.println(" xuong LOW (OUTPUT)");
+  Serial.println(" xuong LOW");
 }
 
 // ============================================================
-// Hàm TẮT BƠM: Chuyển chân về INPUT (Trở kháng cao để Arduino tự kéo lên 5V)
+// Hàm TẮT BƠM (Open-Drain Trở kháng cao)
 // ============================================================
 void tatBom(String reason) {
-  pinMode(triggerCoca, INPUT);  // Trả về INPUT = Idle nhàn rỗi
+  pinMode(triggerCoca, INPUT); 
   pinMode(triggerPepsi, INPUT);
   isDispensing = false;
   currentActivePump = -1;
-  Serial.print("[V8.5-OpenDrain] TAT BOM (Ly do: ");
+  Serial.print("[V9-OpenDrain] TAT BOM (Ly do: ");
   Serial.print(reason);
-  Serial.println("): Da tra tat ca chan ve INPUT (Trở kháng cao)");
+  Serial.println("): Da dua cac chan ve INPUT (Trở kháng cao)");
+}
+
+// ============================================================
+// Bộ xử lý sự kiện WebSocket (WebSocket Event Handler)
+// ============================================================
+void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
+  switch(type) {
+    case WStype_DISCONNECTED:
+      Serial.println("[WebSocket] Mat ket noi voi Server! Dang tu dong ket noi lai...");
+      break;
+
+    case WStype_CONNECTED:
+      Serial.println("[WebSocket] Da ket noi vat ly den Server. Cho Engine.IO Handshake...");
+      break;
+
+    case WStype_TEXT:
+      {
+        String text = String((char*)payload);
+        
+        // Bỏ qua log Ping/Pong để tránh rác log serial
+        if (text != "2" && text != "3") {
+          Serial.printf("[WebSocket Received] %s\n", text.c_str());
+        }
+
+        // 1. Engine.IO Open Packet ('0') -> Trả lời ngay Socket.IO Connect ('40')
+        if (text.startsWith("0")) {
+          Serial.println("[WebSocket] Nhan Handshake tu Engine.IO. Gui Connect Packet '40'...");
+          webSocket.sendTXT("40");
+        }
+
+        // 2. Engine.IO Ping ('2') -> Trả lời ngay Pong ('3') để giữ kết nối
+        else if (text == "2") {
+          webSocket.sendTXT("3");
+        }
+
+        // 3. Socket.IO Event Packet ('42')
+        else if (text.startsWith("42")) {
+          // Lọc sự kiện "machine_command"
+          int firstQuote = text.indexOf('"');
+          int secondQuote = text.indexOf('"', firstQuote + 1);
+          if (firstQuote != -1 && secondQuote != -1) {
+            String eventName = text.substring(firstQuote + 1, secondQuote);
+            if (eventName == "machine_command") {
+              // Lấy nội dung lệnh (nằm trong cặp nháy kép tiếp theo của mảng JSON)
+              int payloadStart = text.indexOf('"', secondQuote + 1);
+              int payloadEnd = text.indexOf('"', payloadStart + 1);
+              if (payloadStart != -1 && payloadEnd != -1) {
+                String command = text.substring(payloadStart + 1, payloadEnd);
+                Serial.print("[WebSocket] Nhan lenh tu Server: ");
+                Serial.println(command);
+                
+                xuLyLenh(command);
+              }
+            }
+          }
+        }
+      }
+      break;
+
+    case WStype_BIN:
+      break;
+    
+    default:
+      break;
+  }
+}
+
+// ============================================================
+// Bộ xử lý thực thi lệnh
+// ============================================================
+void xuLyLenh(String command) {
+  float distance = -1;
+  if (isSensorReady) {
+    float dist = getRawDistance();
+    if (dist > 2.0 && dist <= MAX_PHYSICAL_DISTANCE) {
+      distance = dist;
+    }
+  }
+
+  // A. LỆNH RÓT NƯỚC (Ví dụ: POUR_COCA_S, POUR_PEPSI_M, v.v.)
+  if (command.startsWith("POUR_COCA_") || command.startsWith("POUR_PEPSI_")) {
+    Serial.print("=== BAT DAU QUY TRINH ROT NUOC (WebSockets): ");
+    Serial.println(command);
+
+    // Gửi ACK lập tức qua WebSocket để backend xác nhận
+    guiBaoCaoRotWebSocket(distance != -1 ? distance : emptyDistance, 0.0, "ACK");
+
+    // Xác định chân kích hoạt bơm tương ứng
+    int pumpPin = command.startsWith("POUR_COCA_") ? triggerCoca : triggerPepsi;
+    
+    // Xác định chiều cao nước mục tiêu và thời gian bơm dự phòng
+    char sizeChar = command.charAt(command.length() - 1);
+    if (sizeChar == 'S') {
+      targetHeight = TARGET_HEIGHT_S;
+      targetPourTime = PUMP_TIME_S;
+    } else if (sizeChar == 'L') {
+      targetHeight = TARGET_HEIGHT_L;
+      targetPourTime = PUMP_TIME_L;
+    } else { // Size M hoặc mặc định
+      targetHeight = TARGET_HEIGHT_M;
+      targetPourTime = PUMP_TIME_M;
+    }
+
+    // Hiệu chuẩn đáy ly tự động trước khi rót (đo trung bình nhanh 3 lần)
+    Serial.println("Dang do tu dong hieu chuan day ly...");
+    float sum = 0;
+    int validSamples = 0;
+    for (int i = 0; i < 3; i++) {
+      float dist = getRawDistance();
+      if (dist > 2.0 && dist <= emptyDistance + 2.0 && dist <= MAX_PHYSICAL_DISTANCE) {
+        sum += dist;
+        validSamples++;
+      }
+      delay(50);
+    }
+    
+    if (validSamples > 0) {
+      cupBaseDistance = sum / validSamples;
+    } else {
+      cupBaseDistance = (distance > 0 && distance <= MAX_PHYSICAL_DISTANCE) ? distance : emptyDistance; 
+    }
+
+    Serial.printf("► Day ly hieu chuan: %.1f cm | Muc tieu: %.1f cm | Thoi gian an toan: %.1fs\n", 
+                  cupBaseDistance, targetHeight, targetPourTime / 1000.0);
+
+    // Kích hoạt bơm vật lý và chuyển trạng thái
+    isDispensing = true;
+    batBom(pumpPin);
+    pourStartTime = millis();
+    lastDispensingMeasure = millis();
+    lastDispensingReport = 0;
+    filteredDistance = cupBaseDistance; // Khởi tạo bộ lọc bằng khoảng cách đáy
+    consecutiveTargetCount = 0;
+    consecutiveDangerCount = 0;
+    consecutiveOutliers = 0;
+  } 
+  
+  // B. LỆNH NHẢ LY (DROP_CUP)
+  else if (command == "DROP_CUP") {
+    Serial.println("=== BAT DAU QUY TRINH NHA LY (WebSockets) ===");
+    guiBaoCaoRotWebSocket(distance != -1 ? distance : emptyDistance, 0.0, "ACK");
+    
+    // Kích hoạt nhả ly (Kéo cả 2 chân xuống LOW trong 2.5 giây)
+    pinMode(triggerCoca, OUTPUT);
+    digitalWrite(triggerCoca, LOW);
+    pinMode(triggerPepsi, OUTPUT);
+    digitalWrite(triggerPepsi, LOW);
+    
+    delay(2500);
+    
+    // Đưa về trạng thái INPUT an toàn
+    pinMode(triggerCoca, INPUT);
+    pinMode(triggerPepsi, INPUT);
+    Serial.println("=== HOAN TAT QUY TRINH NHA LY ===");
+  }
+  
+  // C. LỆNH STOP KHẨN CẤP
+  else if (command == "STOP") {
+    tatBom("Nhan lenh STOP tu Server qua WebSocket");
+  }
 }
 
 void setup() {
   Serial.begin(115200);
   delay(2000);
-  Serial.println("\n=== ESP8266 V8.6-Sensor (VL53L0X + EMA + Rate Limiting) ===");
+  Serial.println("\n=== ESP8266 V9.0-WebSockets (VL53L0X + EMA + Rate Limiting) ===");
 
-  // Khởi tạo I2C với chân tùy chỉnh
+  // Khởi tạo I2C
   Wire.begin(SDA_PIN, SCL_PIN);
 
-  // Khởi động và kiểm tra cảm biến VL53L0X
+  // Kiểm tra cảm biến VL53L0X
   Serial.println("Dang kiem tra ket noi cam bien VL53L0X...");
   if (sensor.begin(0x29, false, &Wire)) {
     Serial.println("OK: Da ket noi va doc duoc tin hieu tu VL53L0X!");
     isSensorReady = true;
-    Serial.print("Khoang cach khay trong: ");
-    Serial.print(emptyDistance);
-    Serial.println(" cm");
+    Serial.printf("Khoang cach khay trong: %.1f cm\n", emptyDistance);
   } else {
-    Serial.println("LOI: Khong tim thay hoac loi doc cam bien VL53L0X! He thong se tu dong chay che do du phong (Fallback).");
+    Serial.println("LOI: Khong tim thay VL53L0X! Se tu dong su dung che do du phong (Fallback Timer).");
     isSensorReady = false;
   }
   
-  // KHỞI TẠO CHÂN: Đưa về INPUT để Arduino kéo lên 5V nhàn rỗi an toàn (Open-Drain)
+  // Đặt chân điều khiển về INPUT (Open-Drain nhàn rỗi)
   pinMode(triggerCoca, INPUT);
   pinMode(triggerPepsi, INPUT);
 
+  // Kết nối WiFi
   WiFi.disconnect(true);
   delay(100);
   WiFi.mode(WIFI_STA); 
   delay(100);
 
-  Serial.println("Dang ket noi WiFi...");
+  Serial.printf("Dang ket noi WiFi: %s\n", ssid);
   WiFi.begin(ssid, password);
   
   while (WiFi.status() != WL_CONNECTED) {
@@ -199,11 +337,21 @@ void setup() {
     Serial.print(".");
   }
   Serial.println("\nWiFi da ket noi!");
-  Serial.print("IP: ");
+  Serial.print("IP ESP: ");
   Serial.println(WiFi.localIP());
+
+  // Cấu hình WebSocket Client kết nối Socket.IO Server của Node.js
+  // Endpoint WebSocket Socket.IO v4 mặc định: /socket.io/?EIO=4&transport=websocket
+  Serial.printf("Dang khoi dong WebSocket ket noi toi %s:%d...\n", serverIP, serverPort);
+  webSocket.begin(serverIP, serverPort, "/socket.io/?EIO=4&transport=websocket");
+  webSocket.onEvent(webSocketEvent);
+  webSocket.setReconnectInterval(5000); // Thử lại sau 5s nếu rớt kết nối
 }
 
 void loop() {
+  // Duy trì vòng lặp WebSocket để nhận tin và xử lý Ping/Pong Heartbeat
+  webSocket.loop();
+  
   unsigned long now = millis();
 
   // ============================================================
@@ -212,13 +360,13 @@ void loop() {
   if (isDispensing) {
     unsigned long elapsed = now - pourStartTime;
     
-    // An toàn mạng: nếu mất WiFi > 5.0s khi đang rót → tắt bơm khẩn cấp
+    // Ngắt khẩn cấp nếu mất WiFi > 5.0s khi đang bơm nước
     if (WiFi.status() != WL_CONNECTED) {
       if (wifiDropTime == 0) wifiDropTime = millis();
       if (millis() - wifiDropTime > 5000) {
-        tatBom("Mat WiFi qua 5.0s");
+        tatBom("Mat WiFi qua 5.0s khi dang rot");
         delay(150);
-        guiBaoCaoRot(emptyDistance, 0.0, "DONE");
+        guiBaoCaoRotWebSocket(emptyDistance, 0.0, "DONE");
       }
       WiFi.reconnect();
       return;
@@ -226,14 +374,15 @@ void loop() {
       wifiDropTime = 0;
     }
 
-    // Tránh tràn ly tuyệt đối bằng Watchdog thời gian 20 giây
+    // Bộ hẹn giờ bảo vệ tuyệt đối (Watchdog thời gian 20 giây)
     if (elapsed >= 20000) {
-      tatBom("Watchdog thoi gian 20s");
+      tatBom("Watchdog an toan thoi gian 20s");
       delay(150);
-      guiBaoCaoRot(emptyDistance, 100.0, "DONE");
+      guiBaoCaoRotWebSocket(emptyDistance, 100.0, "DONE");
       return;
     }
 
+    // Đọc cảm biến laser VL53L0X định kỳ 150ms
     if (now - lastDispensingMeasure >= 150) {
       lastDispensingMeasure = now;
       
@@ -243,53 +392,41 @@ void loop() {
       if (isSensorReady) {
         float dist = getRawDistance();
         if (dist > 0.0) {
-          // Giới hạn vật lý: khoảng cách không vượt quá khay trống + 2cm và phải lớn hơn 2cm
+          // Giới hạn vật lý
           if (dist > 2.0 && dist <= emptyDistance + 2.0 && dist <= MAX_PHYSICAL_DISTANCE) {
-            // Tính độ lệch so với khoảng cách đã lọc trước đó
             float diff = dist - filteredDistance;
             
-            // Bộ lọc tốc độ thay đổi (Rate-of-Change): 
-            // Mặt nước dâng lên không thể nhảy đột biến quá 2.0 cm trong 150ms.
-            // Nếu độ lệch > 2.0 cm, đây chắc chắn là nhiễu động (sóng sánh chất lỏng, bọt nước dâng lên...)
+            // Bộ lọc tốc độ thay đổi (Rate-of-Change): Ngăn nhiễu nhảy vọt mặt nước dâng > 2cm trong 150ms
             if (abs(diff) <= 2.0) {
-              // Bộ lọc thông thấp Exponential Moving Average (EMA)
-              // Hệ số 0.35 giúp làm mịn bọt nước nhưng vẫn bám sát cực tốt mực nước thực
+              // Bộ lọc làm mịn Exponential Moving Average (EMA) với hệ số alpha = 0.35
               filteredDistance = 0.35 * dist + 0.65 * filteredDistance;
               distance = filteredDistance;
               readSuccess = true;
               consecutiveOutliers = 0;
             } else {
               consecutiveOutliers++;
-              Serial.print("[Nhiễu đột biến] Bỏ qua cú nhảy khoảng cách: ");
-              Serial.print(dist, 1);
-              Serial.print(" cm (Độ lệch: ");
-              Serial.print(diff, 1);
-              Serial.println(" cm)");
+              Serial.printf("[DSP Rate-of-Change] Bo qua nhiễu dot bien: %.1f cm (Lech: %.1f cm)\n", dist, diff);
 
-              // CƠ CHẾ TỰ KHÔI PHỤC (Latching Recovery):
-              // Nếu gặp 5 lần nhảy khoảng cách liên tiếp, chấp nhận đây là khoảng cách thực tế mới
-              // (Tránh kẹt bộ lọc khi mặt nước dâng lên nhanh hoặc người dùng rót nước thủ công tốc độ cao)
+              // Tự khôi phục (Latching Recovery): 5 lần lệch liên tiếp -> cập nhật thực tế mới
               if (consecutiveOutliers >= 5) {
                 filteredDistance = dist;
                 distance = filteredDistance;
                 readSuccess = true;
                 consecutiveOutliers = 0;
-                Serial.println("[Bộ lọc] Đã tự khôi phục và cập nhật khoảng cách mới!");
+                Serial.println("[DSP Bộ lọc] Tu khoi phuc sau 5 lan nhiễu liên tiep!");
               }
             }
           } else {
             consecutiveOutliers++;
-            Serial.print("[Nhiễu giới hạn] Bỏ qua khoảng cách ngoài tầm vật lý: ");
-            Serial.print(dist, 1);
-            Serial.println(" cm");
+            Serial.printf("[DSP Gioi han] Khoang cach ngoai tam: %.1f cm\n", dist);
           }
         } else {
           consecutiveOutliers++;
-          Serial.println("[Cảm biến] Lỗi đọc tín hiệu laser (RangeStatus != 0)");
+          Serial.println("[Laser] Loi doc tin hieu sensor");
         }
       }
 
-      // Xử lý khi cảm biến đo thành công
+      // Xử lý khi đo đạc cảm biến thành công
       if (readSuccess && distance > 0) {
         float hWater = cupBaseDistance - distance;
         if (hWater < 0) hWater = 0;
@@ -297,215 +434,88 @@ void loop() {
         float progress = (hWater / targetHeight) * 100.0;
         if (progress > 100.0) progress = 100.0;
 
-        Serial.print("[Rot-Sensor] Mực nước: ");
-        Serial.print(hWater, 1);
-        Serial.print(" cm / ");
-        Serial.print(targetHeight, 1);
-        Serial.print(" cm | Khoảng cách: ");
-        Serial.print(distance, 1);
-        Serial.print(" cm | Tiến trình: ");
-        Serial.print(progress, 0);
-        Serial.println("%");
+        Serial.printf("[Sens-Rot] Nuoc: %.1f/%.1f cm | Khoang cach: %.1f cm | Tien trinh: %.0f%%\n", 
+                      hWater, targetHeight, distance, progress);
 
-        // KIỂM TRA ĐIỀU KIỆN NGẮT AN TOÀN
+        // KIỂM TRA ĐIỀU KIỆN TỰ NGẮT AN TOÀN
         bool isDanger = (distance <= SAFE_MIN_DISTANCE);
         bool isTargetReached = (hWater >= targetHeight);
 
         if (isDanger) {
           consecutiveDangerCount++;
           consecutiveTargetCount = 0;
-          Serial.print("[Cảnh báo] Phát hiện nước sát cảm biến lần thứ: ");
-          Serial.println(consecutiveDangerCount);
+          Serial.printf("[Canh bao] Nuoc sat cam bien lan thu: %d\n", consecutiveDangerCount);
         } else if (isTargetReached) {
           consecutiveTargetCount++;
           consecutiveDangerCount = 0;
-          Serial.print("[Cảnh báo] Đạt mực nước mục tiêu lần thứ: ");
-          Serial.println(consecutiveTargetCount);
+          Serial.printf("[Canh bao] Dat muc nuoc muc tieu lan thu: %d\n", consecutiveTargetCount);
         } else {
           consecutiveDangerCount = 0;
           consecutiveTargetCount = 0;
         }
 
-        // Tự động ngắt khi có 1 lần xác nhận đạt đích hoặc 2 lần chạm ngưỡng nguy hiểm (Phản hồi siêu tốc)
+        // Tự ngắt: 1 lần đạt đích hoặc 2 lần chạm ngưỡng nguy hiểm chống tràn ly
         if (consecutiveTargetCount >= 1 || consecutiveDangerCount >= 2) {
           String reason = (consecutiveTargetCount >= 1) ? "Dat muc nuoc muc tieu" : "Chong tran ly (sat cam bien)";
           tatBom(reason);
-          delay(150); // Cho phép nguồn điện và nhiễu sóng ổn định sau khi ngắt bơm
-          guiBaoCaoRot(distance, 100.0, "DONE");
+          delay(150); // Độ trễ ổn định điện áp và sóng nhiễu
+          guiBaoCaoRotWebSocket(distance, 100.0, "DONE");
         } 
-        // Báo cáo tiến trình định kỳ mỗi 1000ms (giảm tải cho WiFi stack)
+        // Báo cáo tiến trình định kỳ mỗi 1000ms qua WebSocket
         else if (now - lastDispensingReport >= 1000) {
           lastDispensingReport = now;
-          guiBaoCaoRot(distance, progress, "");
+          guiBaoCaoRotWebSocket(distance, progress, "");
         }
       }
-      // CHẾ ĐỘ DỰ PHÒNG (FALLBACK TIMER):
-      // Nếu cảm biến bị lỗi vật lý/nhiễu liên tục quá 30 lần (~4.5 giây), hoặc cảm biến hỏng ngay từ đầu
+      // CHẾ ĐỘ DỰ PHÒNG (FALLBACK TIMER): Khi cảm biến lỗi/mất tín hiệu liên tục quá 30 lần (~4.5s)
       else if (!isSensorReady || consecutiveOutliers >= 30) {
         float timeProgress = ((float)elapsed / (float)targetPourTime) * 100.0;
         if (timeProgress > 100.0) timeProgress = 100.0;
 
-        Serial.print("[Rot-FALLBACK-Timer] Thời gian: ");
-        Serial.print(elapsed / 1000.0, 1);
-        Serial.print("/");
-        Serial.print(targetPourTime / 1000.0, 1);
-        Serial.print("s | Tiến trình: ");
-        Serial.print(timeProgress, 0);
-        Serial.println("% (Cảm biến lỗi/mất tín hiệu)");
+        Serial.printf("[Rot-Fallback-Timer] %.1f/%.1fs | Tien trinh: %.0f%% (Laser loi)\n", 
+                      elapsed / 1000.0, targetPourTime / 1000.0, timeProgress);
 
         if (elapsed >= targetPourTime) {
           tatBom("Hoan thanh theo thoi gian du phong (Fallback)");
-          delay(150); // Cho phép nguồn điện và nhiễu sóng ổn định sau khi ngắt bơm
-          guiBaoCaoRot(emptyDistance, 100.0, "DONE");
+          delay(150);
+          guiBaoCaoRotWebSocket(emptyDistance, 100.0, "DONE");
         } else if (now - lastDispensingReport >= 1000) {
           lastDispensingReport = now;
-          guiBaoCaoRot(emptyDistance, timeProgress, "");
+          guiBaoCaoRotWebSocket(emptyDistance, timeProgress, "");
         }
       }
     }
 
-    return; // Thoát sớm loop để dành trọn tài nguyên cho chu kỳ rót nước tốc độ cao
+    return; // Thoát sớm loop khi rót nước để tối đa hóa CPU cho việc đo cảm biến và lọc DSP
   }
 
   // ============================================================
-  // LUỒNG 2: CHỜ LỆNH — Polling backend mỗi 1 giây
+  // LUỒNG 2: CHỜ LỆNH (IDLE) - Đo cảm biến & gửi trạng thái mỗi 1 giây
   // ============================================================
-  if (now - lastPolling >= POLLING_INTERVAL) {
-    lastPolling = now;
+  if (now - lastSensorIdleReport >= IDLE_REPORT_INTERVAL) {
+    lastSensorIdleReport = now;
 
-    // Đo cảm biến khi chờ
     float distance = -1;
     if (isSensorReady) {
       float dist = getRawDistance();
       if (dist > 2.0 && dist <= MAX_PHYSICAL_DISTANCE) {
         distance = dist;
-        Serial.print("[Sensor-Idle] Khoang cach: ");
-        Serial.print(distance, 1);
-        Serial.print(" cm | Phat hien ly: ");
-        Serial.println(distance <= 25.0 ? "CO LY" : "KHONG LY");
+        Serial.printf("[Sensor-Idle] Khoang cach: %.1f cm | Phat hien ly: %s\n", 
+                      distance, (distance <= 25.0 ? "CO LY" : "KHONG LY"));
       } else {
-        Serial.println("[Sensor-Idle] Canh bao: Cam bien doc loi hoac ngoai tam vat ly!");
+        Serial.println("[Sensor-Idle] Canh bao: Cam bien loi hoac ngoai tam vat ly!");
       }
     }
 
+    // Gửi trạng thái cảm biến lên server qua WebSocket (Thay thế hoàn toàn cho HTTP POST cũ)
     if (WiFi.status() == WL_CONNECTED) {
-      WiFiClient client;
-      HTTPClient http;
-      
-      // Gửi trạng thái cảm biến lên server
       if (distance != -1) {
-        bool isCupPlaced = (distance <= 25.0 && distance > 0);
-        String cupPlacedStr = isCupPlaced ? "true" : "false";
-
-        String statusUrl = "http://" + String(serverIP) + ":" + String(serverPort) + "/api/machine/status";
-        http.begin(client, statusUrl);
-        http.addHeader("Content-Type", "application/json");
-        http.POST("{\"water_level\": " + String(distance) + ", \"is_cup_placed\": " + cupPlacedStr + "}");
-        http.end();
+        guiBaoCaoRotWebSocket(distance, 0.0, "");
       }
-
-      // Lấy lệnh từ backend
-      String cmdUrl = "http://" + String(serverIP) + ":" + String(serverPort) + "/api/machine/command";
-      http.begin(client, cmdUrl);
-      int httpCode = http.GET();
-      
-      if (httpCode == 200) {  // Chỉ lọc và xử lý khi HTTP Code = 200 OK
-        String payload = http.getString();
-        payload.trim(); 
-
-        // LỆNH RÓT NƯỚC (Ví dụ: POUR_COCA_S, POUR_PEPSI_M, v.v.)
-        if (payload.startsWith("POUR_COCA_") || payload.startsWith("POUR_PEPSI_")) {
-          Serial.print("=== NHẬN LỆNH RÓT: ");
-          Serial.println(payload);
-
-          // Gửi ACK ngay để backend xóa lệnh
-          guiBaoCaoRot(distance != -1 ? distance : emptyDistance, 0.0, "ACK");
-
-          // Xác định bơm
-          int pumpPin = payload.startsWith("POUR_COCA_") ? triggerCoca : triggerPepsi;
-          
-          // Xác định size, targetHeight và thời gian dự phòng (targetPourTime)
-          char sizeChar = payload.charAt(payload.length() - 1);
-          if (sizeChar == 'S') {
-            targetHeight = TARGET_HEIGHT_S;
-            targetPourTime = PUMP_TIME_S;
-          } else if (sizeChar == 'L') {
-            targetHeight = TARGET_HEIGHT_L;
-            targetPourTime = PUMP_TIME_L;
-          } else { // Size M hoặc mặc định
-            targetHeight = TARGET_HEIGHT_M;
-            targetPourTime = PUMP_TIME_M;
-          }
-
-          // Tự động hiệu chuẩn đáy ly trước khi rót (đo trung bình nhanh 3 lần)
-          Serial.println("Đang đo tự động hiệu chuẩn đáy ly trước khi rót...");
-          float sum = 0;
-          int validSamples = 0;
-          for (int i = 0; i < 3; i++) {
-            float dist = getRawDistance();
-            if (dist > 2.0 && dist <= emptyDistance + 2.0 && dist <= MAX_PHYSICAL_DISTANCE) {
-              sum += dist;
-              validSamples++;
-            }
-            delay(50);
-          }
-          
-          if (validSamples > 0) {
-            cupBaseDistance = sum / validSamples;
-          } else {
-            cupBaseDistance = (distance > 0 && distance <= MAX_PHYSICAL_DISTANCE) ? distance : emptyDistance; 
-          }
-
-          Serial.print("► Đáy ly đo được: ");
-          Serial.print(cupBaseDistance);
-          Serial.print(" cm | Chiều cao nước mục tiêu: ");
-          Serial.print(targetHeight);
-          Serial.print(" cm | Thời gian dự phòng: ");
-          Serial.print(targetPourTime / 1000.0, 1);
-          Serial.println(" giây");
-
-          // Bật bơm vật lý và chuyển sang luồng rót nước
-          isDispensing = true;
-          batBom(pumpPin);
-          pourStartTime = millis();
-          lastDispensingMeasure = millis();
-          lastDispensingReport = 0;
-          filteredDistance = cupBaseDistance; // Khởi tạo bằng khoảng cách đáy cốc
-          consecutiveTargetCount = 0;
-          consecutiveDangerCount = 0;
-          consecutiveOutliers = 0;
-        } 
-        // LỆNH NHẢ LY
-        else if (payload == "DROP_CUP") {
-          Serial.println("=== NHẬN LỆNH NHẢ LY ===");
-          guiBaoCaoRot(distance != -1 ? distance : emptyDistance, 0.0, "ACK");
-          
-          // Kéo cả 2 chân xuống LOW (OUTPUT) để kích hoạt nhả ly (Open-Drain)
-          pinMode(triggerCoca, OUTPUT);
-          digitalWrite(triggerCoca, LOW);
-          pinMode(triggerPepsi, OUTPUT);
-          digitalWrite(triggerPepsi, LOW);
-          
-          delay(2500);
-          
-          // Trả về INPUT (Idle) để nhả tín hiệu
-          pinMode(triggerCoca, INPUT);
-          pinMode(triggerPepsi, INPUT);
-          Serial.println("=== ĐÃ GỬI LỆNH NHẢ LY XONG ===");
-        }
-        // STOP hoặc lệnh không xác định → ĐƯA VỀ INPUT (Idle nhàn rỗi)
-        else {
-          pinMode(triggerCoca, INPUT);
-          pinMode(triggerPepsi, INPUT);
-        }
-      }
-      http.end();
       wifiDropTime = 0;
     } else {
-      if (wifiDropTime == 0) {
-        wifiDropTime = millis();
-      }
-      // Mất WiFi: đưa về INPUT (an toàn tuyệt đối)
+      if (wifiDropTime == 0) wifiDropTime = millis();
+      // An toàn: Mất mạng quá 2 giây đưa các chân về INPUT
       if (millis() - wifiDropTime > 2000) {
         pinMode(triggerCoca, INPUT);
         pinMode(triggerPepsi, INPUT);
