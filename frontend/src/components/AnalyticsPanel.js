@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import { machineService } from "../services/api";
+import { machineService, socket } from "../services/api";
 
 export function AnalyticsPanel() {
   const [activeTab, setActiveTab] = useState("daily");
@@ -28,7 +28,29 @@ export function AnalyticsPanel() {
   };
 
   useEffect(() => {
+    // 1. Tải dữ liệu ban đầu
     fetchAnalytics();
+
+    // 2. Lắng nghe WebSocket để tự động cập nhật ngầm thời gian thực (Silent Refresh)
+    if (socket) {
+      const handleQueueUpdate = () => {
+        console.log("[Socket.IO] Phát hiện thay đổi hệ thống! Tự động cập nhật ngầm dữ liệu thống kê...");
+        machineService.getAnalytics()
+          .then(res => {
+            if (res && res.success) {
+              setAnalytics(res.data);
+            }
+          })
+          .catch(err => console.error("[Socket.IO Auto-Refresh Error]:", err));
+      };
+
+      socket.on("queue_updated", handleQueueUpdate);
+
+      // Clean up listener khi component unmount
+      return () => {
+        socket.off("queue_updated", handleQueueUpdate);
+      };
+    }
   }, []);
 
   if (loading) {
