@@ -11,6 +11,7 @@ dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
+  options: "-c timezone=Asia/Ho_Chi_Minh",
   ssl: {
     rejectUnauthorized: false
   }
@@ -18,7 +19,7 @@ const pool = new Pool({
 
 pool.connect()
   .then(client => {
-    console.log('Đã kết nối thành công tới Database PostgreSQL');
+    console.log('Đã kết nối thành công tới Database PostgreSQL (Session Timezone: Asia/Ho_Chi_Minh)');
     client.release();
   })
   .catch(err => {
